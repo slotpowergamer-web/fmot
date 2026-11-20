@@ -39,6 +39,9 @@ export interface MediaAsset {
   fileName: string;
   mimeType: 'image/webp' | 'image/jpeg' | 'image/png';
   dataUrl: string;
+  storagePath?: string;
+  publicUrl?: string;
+  source?: 'supabase' | 'firebase';
   width: number;
   height: number;
   sizeBytes: number;

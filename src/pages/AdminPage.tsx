@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Check,
+  ExternalLink,
   Eye,
   Image as ImageIcon,
   Loader2,
@@ -14,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { AdminRecordsPanel, AdminRecordSection } from '../components/admin/AdminRecordsPanel';
+import { AdminSupabaseMigrationPanel } from '../components/admin/AdminSupabaseMigrationPanel';
 import { MediaImage } from '../components/MediaImage';
 import { usePortal } from '../context/PortalContext';
 import { ManagedPageKey, PortalConfig, PortalSlot } from '../types/portal';
@@ -51,6 +53,12 @@ export const AdminPage: React.FC = () => {
     deleteMediaAsset,
     openQuickImageEditor,
     resolveMediaUrl,
+    loadingMediaLibrary,
+    loadFullMediaLibrary,
+    quotaExceeded,
+    quotaUpgradeUrl,
+    supabaseAdminEmail,
+    supabaseReadyForWrites,
   } = usePortal();
 
   const [adminTab, setAdminTab] = useState<AdminTab>('hierarquia');
@@ -65,6 +73,12 @@ export const AdminPage: React.FC = () => {
   useEffect(() => {
     setDraftConfig(config);
   }, [config]);
+
+  useEffect(() => {
+    if (isAdmin && (adminTab === 'acervo_midia' || adminTab === 'hierarquia')) {
+      void loadFullMediaLibrary();
+    }
+  }, [isAdmin, adminTab, loadFullMediaLibrary]);
 
   const handleSlotMetaSave = async (slot: PortalSlot) => {
     const edited = slotEdits[slot.id];
@@ -84,7 +98,8 @@ export const AdminPage: React.FC = () => {
   }
 
   // Protected Login Gate
-  if (!user || !isAdmin) {
+  const activeAdminEmail = user?.email || supabaseAdminEmail || '';
+  if (!isAdmin || !activeAdminEmail) {
     return (
       <div className="mx-auto max-w-xl px-6 py-24">
         <div className="border border-[#263F24]/70 bg-[#0B100C]/95 p-8 sm:p-10">
@@ -167,8 +182,10 @@ export const AdminPage: React.FC = () => {
             Painel de Mídia e Conteúdo
           </h1>
           <p className="mt-2 text-xs text-[#A5AAA2]">
-            Autenticado como <span className="text-[#F1F3EC]">{user.email}</span> · Armazenamento
-            persistente em banco de dados.
+            Autenticado como <span className="text-[#F1F3EC]">{activeAdminEmail}</span> ·{' '}
+            {supabaseReadyForWrites
+              ? 'Armazenamento ativo no Supabase Storage (Firebase preservado para recuperação).'
+              : 'Armazenamento persistente em banco de dados.'}
           </p>
         </div>
 
@@ -196,6 +213,35 @@ export const AdminPage: React.FC = () => {
           </button>
         </div>
       </header>
+
+      {/* Admin-Only Firestore Quota Notice */}
+      {quotaExceeded && (
+        <div className="flex flex-col justify-between gap-4 border border-[#8BAA43]/60 bg-[#0B100C] p-5 sm:flex-row sm:items-center">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-[#8BAA43]" />
+            <div className="space-y-1 text-xs">
+              <p className="font-semibold text-[#F1F3EC]">
+                Limite diário gratuito de leituras do Firestore atingido
+              </p>
+              <p className="leading-relaxed text-[#A5AAA2]">
+                Suas fotografias continuam salvas com segurança no banco de dados e voltarão a
+                carregar automaticamente quando a cota diária reiniciar amanhã ou após o upgrade do
+                banco de dados. O cache local foi ativado para manter as imagens salvas no navegador
+                assim que carregadas.
+              </p>
+            </div>
+          </div>
+          <a
+            href={quotaUpgradeUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex shrink-0 items-center gap-2 border border-[#8BAA43] bg-[#263F24]/60 px-4 py-2.5 text-xs font-semibold text-[#F1F3EC] transition-colors hover:bg-[#8BAA43] hover:text-[#050705] whitespace-nowrap"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Abrir Firebase Console
+          </a>
+        </div>
+      )}
 
       {/* Admin Section Navigation */}
       <nav
@@ -521,6 +567,8 @@ export const AdminPage: React.FC = () => {
       {/* ACERVO PERSISTENTE */}
       {adminTab === 'acervo_midia' && (
         <div className="space-y-6">
+          <AdminSupabaseMigrationPanel />
+
           <div className="border-b border-[#263F24]/45 pb-4">
             <h2 className="font-display text-3xl font-bold text-[#F1F3EC]">
               Acervo Persistente de Fotografias ({mediaAssets.length})
@@ -530,11 +578,18 @@ export const AdminPage: React.FC = () => {
             </p>
           </div>
 
-          {mediaAssets.length === 0 ? (
+          {loadingMediaLibrary && mediaAssets.length === 0 ? (
+            <div className="flex flex-col items-center justify-center border border-[#263F24]/50 bg-[#050705] py-16 text-center">
+              <Loader2 className="h-7 w-7 animate-spin text-[#8BAA43]" />
+              <p className="mt-3 text-sm font-semibold text-[#F1F3EC]">
+                Carregando acervo de fotografias...
+              </p>
+            </div>
+          ) : mediaAssets.length === 0 ? (
             <div className="flex flex-col items-center justify-center border border-[#263F24]/50 bg-[#050705] py-16 text-center">
               <ImageIcon className="h-8 w-8 text-[#526B32]" />
               <p className="mt-3 text-sm font-semibold text-[#F1F3EC]">
-                Nenhuma fotografia enviada ainda.
+                Nenhuma fotografia carregada no momento.
               </p>
               <p className="mt-1 text-xs text-[#A5AAA2]">
                 Use as abas acima ou ative a Edição Direta nas Páginas para enviar suas fotografias.

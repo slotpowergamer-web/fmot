@@ -59,6 +59,7 @@ export const MediaImage: React.FC<MediaImageProps> = ({
           alt={alt}
           referrerPolicy="no-referrer"
           loading="lazy"
+          decoding="async"
           onError={() => setHasError(true)}
           className={`${objectFit === 'contain' ? 'object-contain' : 'object-cover'} ${className}`}
         />

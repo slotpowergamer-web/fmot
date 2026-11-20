@@ -18,6 +18,23 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+export function dataUrlToBlob(dataUrl: string, fallbackMime = 'image/webp'): Blob {
+  const commaIndex = dataUrl.indexOf(',');
+  if (commaIndex === -1) {
+    throw new Error('Formato dataUrl inválido para conversão binária.');
+  }
+  const header = dataUrl.slice(0, commaIndex);
+  const base64 = dataUrl.slice(commaIndex + 1);
+  const mimeMatch = header.match(/data:([^;]+);base64/i);
+  const mimeType = mimeMatch?.[1] || fallbackMime;
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
 export function validateImageFile(file: File): string | null {
   if (!ALLOWED_INPUT_TYPES.includes(file.type)) {
     return 'Formato inválido. Utilize apenas imagens JPG, PNG ou WebP.';
