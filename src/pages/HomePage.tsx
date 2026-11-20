@@ -2,6 +2,7 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { ArrowUpRight } from 'lucide-react';
 import { MediaImage } from '../components/MediaImage';
+import { DiscordCommunitySection } from '../components/DiscordCommunitySection';
 import { usePortal } from '../context/PortalContext';
 import { PortalTab } from '../types/portal';
 
@@ -304,6 +305,9 @@ export const HomePage: React.FC = () => {
           </div>
         </div>
       </section>
+
+      {/* 5. OFFICIAL DISCORD COMMUNITY SECTION */}
+      <DiscordCommunitySection />
     </div>
   );
 };

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Lock, Menu, Pencil, ShieldCheck, X } from 'lucide-react';
+import { DISCORD_INVITE_URL, DiscordIcon } from './DiscordIcon';
 import { usePortal } from '../context/PortalContext';
 import { PortalTab } from '../types/portal';
 
@@ -90,6 +91,16 @@ export const TopNav: React.FC = () => {
                 </button>
               );
             })}
+
+            <a
+              href={DISCORD_INVITE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group inline-flex items-center gap-1.5 py-2 text-sm font-medium tracking-wide text-[#A9B2FF] transition-colors duration-200 hover:text-[#F1F3EC] whitespace-nowrap shrink-0"
+            >
+              <DiscordIcon className="h-4 w-4 text-[#5865F2] transition-transform duration-200 group-hover:scale-110 group-hover:text-[#7C88FF]" />
+              <span>Discord</span>
+            </a>
           </nav>
 
           {/* Zone 3: Single Discreet Admin Control + Mobile Menu Trigger */}
@@ -194,6 +205,19 @@ export const TopNav: React.FC = () => {
                   </button>
                 );
               })}
+
+              <a
+                href={DISCORD_INVITE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setMobileOpen(false)}
+                className="flex w-full items-center gap-4 border-b border-[#5865F2]/35 py-3.5 text-left"
+              >
+                <DiscordIcon className="h-5 w-5 text-[#5865F2] shrink-0" />
+                <span className="font-display text-3xl font-bold tracking-wider text-[#A9B2FF]">
+                  Discord
+                </span>
+              </a>
             </nav>
 
             <div className="flex items-center justify-between border-t border-[#263F24]/40 pt-4">

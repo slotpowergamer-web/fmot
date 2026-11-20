@@ -1,4 +1,5 @@
 import React from 'react';
+import { DISCORD_INVITE_URL, DiscordIcon } from './DiscordIcon';
 import { usePortal } from '../context/PortalContext';
 import { PortalTab } from '../types/portal';
 
@@ -50,6 +51,15 @@ export const PortalFooter: React.FC = () => {
                 {link.label}
               </button>
             ))}
+            <a
+              href={DISCORD_INVITE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs font-medium tracking-wider text-[#A9B2FF] transition-colors hover:text-[#F1F3EC] whitespace-nowrap shrink-0"
+            >
+              <DiscordIcon className="h-3.5 w-3.5 text-[#5865F2]" />
+              <span>Discord</span>
+            </a>
           </nav>
         </div>
 
