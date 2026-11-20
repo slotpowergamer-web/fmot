@@ -1,0 +1,8 @@
+{
+  "name": "1.F.M.O.T — Portal Institucional Oficial",
+  "description": "Portal institucional oficial da corporação 1.F.M.O.T no BRP: identidade, quem somos, hierarquia, funções, trabalhos e operações, galeria e gerenciamento administrativo de mídia.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

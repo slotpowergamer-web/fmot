@@ -1,0 +1,459 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Reusable Hardened Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrapAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'slotpowergamer@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrapAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isValidStringList(listVal, maxItems) {
+      return listVal is list && listVal.size() <= maxItems && (
+        listVal.size() == 0 || (listVal[0] is string && listVal[0].size() <= 300)
+      );
+    }
+
+    function isValidMapList(listVal, maxItems) {
+      return listVal is list && listVal.size() <= maxItems && (
+        listVal.size() == 0 || listVal[0] is map
+      );
+    }
+
+    function isValidPageName(page) {
+      return page in [
+        'identidade',
+        'inicio',
+        'quem_somos',
+        'hierarquia',
+        'funcoes',
+        'operacoes',
+        'galeria'
+      ];
+    }
+
+    function isValidRankId(rankId) {
+      return rankId in [
+        'rank_coronel',
+        'rank_capitao',
+        'rank_sargento',
+        'rank_cabo',
+        'rank_soldado',
+        'rank_recruta'
+      ];
+    }
+
+    // 3. Entity Validation Blueprints (Anti-Update-Gap)
+
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['email', 'displayName', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['email', 'displayName', 'role', 'createdAt']) &&
+        isValidString(data.email, 5, 160) &&
+        isValidString(data.displayName, 1, 120) &&
+        data.role == 'admin' &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidPortalConfig(data) {
+      return data.keys().hasAll(['heroHeadline', 'heroSubtext', 'aboutIntro', 'aboutDifferentiator', 'updatedAt', 'updatedBy']) &&
+        data.keys().hasOnly([
+          'heroHeadline',
+          'heroSubtext',
+          'aboutIntro',
+          'aboutOperationsText',
+          'aboutDifferentiator',
+          'aboutIdentityText',
+          'aboutValues',
+          'updatedAt',
+          'updatedBy'
+        ]) &&
+        isValidString(data.heroHeadline, 2, 240) &&
+        isValidString(data.heroSubtext, 5, 1200) &&
+        isValidString(data.aboutIntro, 5, 3000) &&
+        isValidOptionalString(data, 'aboutOperationsText', 2000) &&
+        isValidString(data.aboutDifferentiator, 5, 600) &&
+        isValidOptionalString(data, 'aboutIdentityText', 2000) &&
+        (!('aboutValues' in data) || isValidMapList(data.aboutValues, 8)) &&
+        data.updatedBy == request.auth.uid &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidMediaAsset(data) {
+      return data.keys().hasAll([
+        'fileName',
+        'mimeType',
+        'dataUrl',
+        'width',
+        'height',
+        'sizeBytes',
+        'page',
+        'title',
+        'uploadedBy',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'fileName',
+        'mimeType',
+        'dataUrl',
+        'width',
+        'height',
+        'sizeBytes',
+        'page',
+        'title',
+        'description',
+        'uploadedBy',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidString(data.fileName, 1, 180) &&
+      data.mimeType in ['image/webp', 'image/jpeg', 'image/png'] &&
+      isValidString(data.dataUrl, 30, 750000) &&
+      data.dataUrl[0:11] == 'data:image/' &&
+      data.width is number && data.width > 0 && data.width <= 4096 &&
+      data.height is number && data.height > 0 && data.height <= 4096 &&
+      data.sizeBytes is number && data.sizeBytes > 0 && data.sizeBytes <= 650000 &&
+      isValidPageName(data.page) &&
+      isValidString(data.title, 1, 140) &&
+      isValidOptionalString(data, 'description', 500) &&
+      data.uploadedBy == request.auth.uid &&
+      data.createdAt is timestamp &&
+      data.updatedAt == request.time;
+    }
+
+    function isValidPortalSlot(data) {
+      return data.keys().hasAll(['page', 'label', 'title', 'imageUrl', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'page',
+          'label',
+          'title',
+          'description',
+          'imageUrl',
+          'mediaAssetId',
+          'isCover',
+          'updatedBy',
+          'updatedAt'
+        ]) &&
+        isValidPageName(data.page) &&
+        isValidString(data.label, 1, 120) &&
+        isValidString(data.title, 1, 160) &&
+        isValidOptionalString(data, 'description', 600) &&
+        isValidString(data.imageUrl, 0, 2000) &&
+        isValidOptionalString(data, 'mediaAssetId', 128) &&
+        (!('isCover' in data) || data.isCover is bool) &&
+        data.updatedBy == request.auth.uid &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidHierarchyNode(data) {
+      return data.keys().hasAll([
+        'rankTitle',
+        'memberName',
+        'positionCode',
+        'tier',
+        'responsibility',
+        'order',
+        'isDemo',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'rankTitle',
+        'memberName',
+        'positionCode',
+        'tier',
+        'parentId',
+        'responsibility',
+        'insigniaUrl',
+        'photoUrl',
+        'order',
+        'isDemo',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      isValidString(data.rankTitle, 1, 120) &&
+      isValidString(data.memberName, 0, 120) &&
+      isValidString(data.positionCode, 1, 60) &&
+      data.tier is number && data.tier >= 1 && data.tier <= 6 &&
+      isValidOptionalString(data, 'parentId', 128) &&
+      isValidString(data.responsibility, 1, 1000) &&
+      isValidOptionalString(data, 'insigniaUrl', 2000) &&
+      isValidOptionalString(data, 'photoUrl', 2000) &&
+      data.order is number && data.order >= 0 && data.order <= 1000 &&
+      data.isDemo is bool &&
+      data.updatedBy == request.auth.uid &&
+      data.updatedAt == request.time;
+    }
+
+    function isValidHierarchyMember(data) {
+      return data.keys().hasAll([
+        'rankId',
+        'name',
+        'photoUrl',
+        'description',
+        'status',
+        'order',
+        'createdAt',
+        'updatedAt',
+        'updatedBy'
+      ]) &&
+      data.keys().hasOnly([
+        'rankId',
+        'name',
+        'photoUrl',
+        'description',
+        'status',
+        'order',
+        'createdAt',
+        'updatedAt',
+        'updatedBy'
+      ]) &&
+      isValidRankId(data.rankId) &&
+      isValidString(data.name, 1, 120) &&
+      isValidString(data.photoUrl, 0, 2000) &&
+      isValidString(data.description, 0, 800) &&
+      data.status in ['Ativo', 'Em Capacitação', 'Afastado', 'Inativo'] &&
+      data.order is number && data.order >= 0 && data.order <= 100000 &&
+      data.createdAt is timestamp &&
+      data.updatedAt == request.time &&
+      data.updatedBy == request.auth.uid;
+    }
+
+    function isValidRoleSpecialty(data) {
+      return data.keys().hasAll([
+        'name',
+        'category',
+        'iconName',
+        'description',
+        'responsibilities',
+        'requirements',
+        'order',
+        'isDemo',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'name',
+        'category',
+        'iconName',
+        'imageUrl',
+        'description',
+        'responsibilities',
+        'requirements',
+        'order',
+        'isDemo',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      isValidString(data.name, 1, 120) &&
+      isValidString(data.category, 1, 80) &&
+      isValidString(data.iconName, 1, 60) &&
+      isValidOptionalString(data, 'imageUrl', 2000) &&
+      isValidString(data.description, 1, 1000) &&
+      isValidStringList(data.responsibilities, 8) &&
+      isValidStringList(data.requirements, 8) &&
+      data.order is number && data.order >= 0 && data.order <= 1000 &&
+      data.isDemo is bool &&
+      data.updatedBy == request.auth.uid &&
+      data.updatedAt == request.time;
+    }
+
+    function isValidOperationRecord(data) {
+      return data.keys().hasAll([
+        'title',
+        'category',
+        'date',
+        'summary',
+        'details',
+        'results',
+        'coverImageUrl',
+        'featured',
+        'isDemo',
+        'order',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'title',
+        'category',
+        'date',
+        'summary',
+        'details',
+        'results',
+        'coverImageUrl',
+        'galleryUrls',
+        'featured',
+        'isDemo',
+        'order',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      isValidString(data.title, 1, 160) &&
+      isValidString(data.category, 1, 80) &&
+      isValidString(data.date, 0, 40) &&
+      isValidString(data.summary, 1, 600) &&
+      isValidString(data.details, 1, 4000) &&
+      isValidString(data.results, 0, 1200) &&
+      isValidString(data.coverImageUrl, 0, 2000) &&
+      (!('galleryUrls' in data) || isValidStringList(data.galleryUrls, 6)) &&
+      data.featured is bool &&
+      data.isDemo is bool &&
+      data.order is number && data.order >= 0 && data.order <= 1000 &&
+      data.updatedBy == request.auth.uid &&
+      data.updatedAt == request.time;
+    }
+
+    function isValidGalleryItem(data) {
+      return data.keys().hasAll([
+        'title',
+        'category',
+        'date',
+        'imageUrl',
+        'isCover',
+        'order',
+        'isDemo',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'title',
+        'description',
+        'category',
+        'date',
+        'imageUrl',
+        'isCover',
+        'order',
+        'isDemo',
+        'updatedBy',
+        'updatedAt'
+      ]) &&
+      isValidString(data.title, 1, 140) &&
+      isValidOptionalString(data, 'description', 500) &&
+      isValidString(data.category, 1, 80) &&
+      isValidString(data.date, 0, 40) &&
+      isValidString(data.imageUrl, 0, 2000) &&
+      data.isCover is bool &&
+      data.order is number && data.order >= 0 && data.order <= 1000 &&
+      data.isDemo is bool &&
+      data.updatedBy == request.auth.uid &&
+      data.updatedAt == request.time;
+    }
+
+    // 4. Collection Rules
+
+    match /test/connection {
+      allow get: if true;
+    }
+
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isBootstrapAdmin() || (isVerifiedUser() && request.auth.uid == userId));
+      allow list: if isBootstrapAdmin();
+      allow create: if isValidId(userId) && isValidAdminUser(incoming()) && incoming().createdAt == request.time && isBootstrapAdmin();
+      allow update: if isValidId(userId) && isValidAdminUser(incoming()) && incoming().createdAt == existing().createdAt && isBootstrapAdmin();
+      allow delete: if isValidId(userId) && isBootstrapAdmin();
+    }
+
+    match /portal_config/{configId} {
+      allow get: if isValidId(configId);
+      allow list: if true;
+      allow create: if isValidId(configId) && isVerifiedUser() && isValidPortalConfig(incoming()) && isAdmin();
+      allow update: if isValidId(configId) && isVerifiedUser() && isValidPortalConfig(incoming()) && isAdmin();
+      allow delete: if isValidId(configId) && isAdmin();
+    }
+
+    match /media_assets/{assetId} {
+      allow get: if isValidId(assetId);
+      allow list: if true;
+      allow create: if isValidId(assetId) && isVerifiedUser() && isValidMediaAsset(incoming()) && incoming().createdAt == request.time && isAdmin();
+      allow update: if isValidId(assetId) && isVerifiedUser() && isValidMediaAsset(incoming()) && incoming().createdAt == existing().createdAt && isAdmin();
+      allow delete: if isValidId(assetId) && isAdmin();
+    }
+
+    match /portal_slots/{slotId} {
+      allow get: if isValidId(slotId);
+      allow list: if true;
+      allow create: if isValidId(slotId) && isVerifiedUser() && isValidPortalSlot(incoming()) && isAdmin();
+      allow update: if isValidId(slotId) && isVerifiedUser() && isValidPortalSlot(incoming()) && isAdmin();
+      allow delete: if isValidId(slotId) && isAdmin();
+    }
+
+    match /hierarchy_nodes/{nodeId} {
+      allow get: if isValidId(nodeId);
+      allow list: if true;
+      allow create: if isValidId(nodeId) && isVerifiedUser() && isValidHierarchyNode(incoming()) && isAdmin();
+      allow update: if isValidId(nodeId) && isVerifiedUser() && isValidHierarchyNode(incoming()) && isAdmin();
+      allow delete: if isValidId(nodeId) && isAdmin();
+    }
+
+    match /hierarchy_members/{memberId} {
+      allow get: if isValidId(memberId);
+      allow list: if true;
+      allow create: if isValidId(memberId) && isVerifiedUser() && isValidHierarchyMember(incoming()) && incoming().createdAt == request.time && isAdmin();
+      allow update: if isValidId(memberId) && isVerifiedUser() && isValidHierarchyMember(incoming()) && incoming().createdAt == existing().createdAt && isAdmin();
+      allow delete: if isValidId(memberId) && isAdmin();
+    }
+
+    match /roles_catalog/{roleId} {
+      allow get: if isValidId(roleId);
+      allow list: if true;
+      allow create: if isValidId(roleId) && isVerifiedUser() && isValidRoleSpecialty(incoming()) && isAdmin();
+      allow update: if isValidId(roleId) && isVerifiedUser() && isValidRoleSpecialty(incoming()) && isAdmin();
+      allow delete: if isValidId(roleId) && isAdmin();
+    }
+
+    match /operations_records/{opId} {
+      allow get: if isValidId(opId);
+      allow list: if true;
+      allow create: if isValidId(opId) && isVerifiedUser() && isValidOperationRecord(incoming()) && isAdmin();
+      allow update: if isValidId(opId) && isVerifiedUser() && isValidOperationRecord(incoming()) && isAdmin();
+      allow delete: if isValidId(opId) && isAdmin();
+    }
+
+    match /gallery_items/{itemId} {
+      allow get: if isValidId(itemId);
+      allow list: if true;
+      allow create: if isValidId(itemId) && isVerifiedUser() && isValidGalleryItem(incoming()) && isAdmin();
+      allow update: if isValidId(itemId) && isVerifiedUser() && isValidGalleryItem(incoming()) && isAdmin();
+      allow delete: if isValidId(itemId) && isAdmin();
+    }
+  }
+}

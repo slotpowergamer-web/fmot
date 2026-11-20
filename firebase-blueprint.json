@@ -1,0 +1,222 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized administrator permitted to manage portal media and institutional content.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "displayName", "role", "createdAt"]
+    },
+    "PortalConfig": {
+      "title": "PortalConfig",
+      "description": "Official institutional texts for the 1.F.M.O.T portal inside BRP.",
+      "type": "object",
+      "properties": {
+        "heroHeadline": { "type": "string", "maxLength": 240 },
+        "heroSubtext": { "type": "string", "maxLength": 1200 },
+        "aboutIntro": { "type": "string", "maxLength": 3000 },
+        "aboutOperationsText": { "type": "string", "maxLength": 2000 },
+        "aboutDifferentiator": { "type": "string", "maxLength": 600 },
+        "aboutIdentityText": { "type": "string", "maxLength": 2000 },
+        "aboutValues": { "type": "array", "description": "Up to 8 institutional values." },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["heroHeadline", "heroSubtext", "aboutIntro", "aboutDifferentiator", "updatedAt", "updatedBy"]
+    },
+    "MediaAsset": {
+      "title": "MediaAsset",
+      "description": "Persistently stored optimized official photograph uploaded by the administrator.",
+      "type": "object",
+      "properties": {
+        "fileName": { "type": "string", "maxLength": 180 },
+        "mimeType": { "type": "string", "enum": ["image/webp", "image/jpeg", "image/png"] },
+        "dataUrl": { "type": "string", "maxLength": 750000 },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "sizeBytes": { "type": "number" },
+        "page": {
+          "type": "string",
+          "enum": ["identidade", "inicio", "quem_somos", "hierarquia", "funcoes", "operacoes", "galeria"]
+        },
+        "title": { "type": "string", "maxLength": 140 },
+        "description": { "type": "string", "maxLength": 500 },
+        "uploadedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["fileName", "mimeType", "dataUrl", "width", "height", "sizeBytes", "page", "title", "uploadedBy", "createdAt", "updatedAt"]
+    },
+    "PortalSlot": {
+      "title": "PortalSlot",
+      "description": "Managed image slot bound to a specific institutional section.",
+      "type": "object",
+      "properties": {
+        "page": {
+          "type": "string",
+          "enum": ["identidade", "inicio", "quem_somos", "hierarquia", "funcoes", "operacoes", "galeria"]
+        },
+        "label": { "type": "string", "maxLength": 120 },
+        "title": { "type": "string", "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 600 },
+        "imageUrl": { "type": "string", "maxLength": 2000 },
+        "mediaAssetId": { "type": "string", "maxLength": 128 },
+        "isCover": { "type": "boolean" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["page", "label", "title", "imageUrl", "updatedBy", "updatedAt"]
+    },
+    "HierarchyNode": {
+      "title": "HierarchyNode",
+      "description": "Official rank within the 6-tier 1.F.M.O.T hierarchy (Coronel to Recruta).",
+      "type": "object",
+      "properties": {
+        "rankTitle": { "type": "string", "maxLength": 120 },
+        "memberName": { "type": "string", "maxLength": 120 },
+        "positionCode": { "type": "string", "maxLength": 60 },
+        "tier": { "type": "number" },
+        "parentId": { "type": "string", "maxLength": 128 },
+        "responsibility": { "type": "string", "maxLength": 1000 },
+        "insigniaUrl": { "type": "string", "maxLength": 2000 },
+        "photoUrl": { "type": "string", "maxLength": 2000 },
+        "order": { "type": "number" },
+        "isDemo": { "type": "boolean" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["rankTitle", "memberName", "positionCode", "tier", "responsibility", "order", "isDemo", "updatedBy", "updatedAt"]
+    },
+    "HierarchyMember": {
+      "title": "HierarchyMember",
+      "description": "Individual member assigned to one of the 6 official 1.F.M.O.T hierarchy ranks, supporting unlimited members per rank.",
+      "type": "object",
+      "properties": {
+        "rankId": {
+          "type": "string",
+          "enum": [
+            "rank_coronel",
+            "rank_capitao",
+            "rank_sargento",
+            "rank_cabo",
+            "rank_soldado",
+            "rank_recruta"
+          ]
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "photoUrl": { "type": "string", "maxLength": 2000 },
+        "description": { "type": "string", "maxLength": 800 },
+        "status": {
+          "type": "string",
+          "enum": ["Ativo", "Em Capacitação", "Afastado", "Inativo"]
+        },
+        "order": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["rankId", "name", "photoUrl", "description", "status", "order", "createdAt", "updatedAt", "updatedBy"]
+    },
+    "RoleSpecialty": {
+      "title": "RoleSpecialty",
+      "description": "Operational role or area of action within 1.F.M.O.T.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 120 },
+        "category": { "type": "string", "maxLength": 80 },
+        "iconName": { "type": "string", "maxLength": 60 },
+        "imageUrl": { "type": "string", "maxLength": 2000 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "responsibilities": { "type": "array", "description": "Up to 8 responsibility strings." },
+        "requirements": { "type": "array", "description": "Up to 8 qualification strings." },
+        "order": { "type": "number" },
+        "isDemo": { "type": "boolean" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "category", "iconName", "description", "responsibilities", "requirements", "order", "isDemo", "updatedBy", "updatedAt"]
+    },
+    "OperationRecord": {
+      "title": "OperationRecord",
+      "description": "Institutional work or operation publication.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 160 },
+        "category": { "type": "string", "maxLength": 80 },
+        "date": { "type": "string", "maxLength": 40 },
+        "summary": { "type": "string", "maxLength": 600 },
+        "details": { "type": "string", "maxLength": 4000 },
+        "results": { "type": "string", "maxLength": 1200 },
+        "coverImageUrl": { "type": "string", "maxLength": 2000 },
+        "galleryUrls": { "type": "array", "description": "Up to 6 additional image references." },
+        "featured": { "type": "boolean" },
+        "isDemo": { "type": "boolean" },
+        "order": { "type": "number" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "category", "date", "summary", "details", "results", "coverImageUrl", "featured", "isDemo", "order", "updatedBy", "updatedAt"]
+    },
+    "GalleryItem": {
+      "title": "GalleryItem",
+      "description": "Institutional gallery photograph with ordering and category.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 140 },
+        "description": { "type": "string", "maxLength": 500 },
+        "category": { "type": "string", "maxLength": 80 },
+        "date": { "type": "string", "maxLength": 40 },
+        "imageUrl": { "type": "string", "maxLength": 2000 },
+        "isCover": { "type": "boolean" },
+        "order": { "type": "number" },
+        "isDemo": { "type": "boolean" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "category", "date", "imageUrl", "isCover", "order", "isDemo", "updatedBy", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Authorized administrator registry."
+    },
+    "/portal_config/{configId}": {
+      "schema": { "$ref": "#/entities/PortalConfig" },
+      "description": "Main editable institutional texts."
+    },
+    "/media_assets/{assetId}": {
+      "schema": { "$ref": "#/entities/MediaAsset" },
+      "description": "Persistent optimized official photographs uploaded via Admin Panel."
+    },
+    "/portal_slots/{slotId}": {
+      "schema": { "$ref": "#/entities/PortalSlot" },
+      "description": "Page-level managed visual slots."
+    },
+    "/hierarchy_nodes/{nodeId}": {
+      "schema": { "$ref": "#/entities/HierarchyNode" },
+      "description": "6-tier official 1.F.M.O.T hierarchy ranks."
+    },
+    "/hierarchy_members/{memberId}": {
+      "schema": { "$ref": "#/entities/HierarchyMember" },
+      "description": "Dynamic individual members belonging to any of the 6 official hierarchy ranks."
+    },
+    "/roles_catalog/{roleId}": {
+      "schema": { "$ref": "#/entities/RoleSpecialty" },
+      "description": "Operational roles catalog."
+    },
+    "/operations_records/{opId}": {
+      "schema": { "$ref": "#/entities/OperationRecord" },
+      "description": "Institutional operations and works."
+    },
+    "/gallery_items/{itemId}": {
+      "schema": { "$ref": "#/entities/GalleryItem" },
+      "description": "Institutional gallery photography."
+    }
+  }
+}
