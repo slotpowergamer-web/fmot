@@ -9,8 +9,8 @@ export interface OptimizedImageResult {
 }
 
 const ALLOWED_INPUT_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-const MAX_INPUT_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB input cap
-const TARGET_MAX_DATAURL_CHARS = 580000; // Safe margin below 750k Firestore rule limit
+const MAX_INPUT_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB input cap (matches fmot-media bucket limit)
+const TARGET_MAX_BINARY_BYTES = 2.5 * 1024 * 1024; // Crisp high-res web delivery for Supabase Storage
 
 export function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -35,9 +35,35 @@ export function dataUrlToBlob(dataUrl: string, fallbackMime = 'image/webp'): Blo
   return new Blob([bytes], { type: mimeType });
 }
 
+/**
+ * Computes a deterministic SHA-256 hex digest of an image Blob to prevent duplicate uploads
+ * of identical files in Supabase Storage (`fmot-media`).
+ */
+export async function computeBlobSha256Hex(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.subtle) {
+    const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', buffer);
+    return Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+  // Fallback deterministic FNV-1a 64-bit-like hex if subtle crypto is unavailable
+  const bytes = new Uint8Array(buffer);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < bytes.length; i += 1) {
+    h1 = Math.imul(h1 ^ bytes[i], 0x01000193);
+    h2 = Math.imul(h2 ^ bytes[i], 0x85ebca6b);
+  }
+  return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
+}
+
 export function validateImageFile(file: File): string | null {
   if (!ALLOWED_INPUT_TYPES.includes(file.type)) {
     return 'Formato inválido. Utilize apenas imagens JPG, PNG ou WebP.';
+  }
+  if (file.size <= 0) {
+    return 'O arquivo selecionado está vazio.';
   }
   if (file.size > MAX_INPUT_SIZE_BYTES) {
     return 'Arquivo excede o limite de 15 MB. Selecione uma imagem menor.';
@@ -71,10 +97,10 @@ export async function optimizeImageFile(
   const img = await loadImageElement(file);
   const preserveTransparency =
     options?.preserveTransparency ?? (file.type === 'image/png' || file.type === 'image/webp');
-  let maxDimension = options?.maxDimension ?? (preserveTransparency ? 1024 : 1400);
+  let maxDimension = options?.maxDimension ?? (preserveTransparency ? 1400 : 1920);
 
-  let width = img.naturalWidth;
-  let height = img.naturalHeight;
+  const width = img.naturalWidth;
+  const height = img.naturalHeight;
 
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
@@ -106,38 +132,39 @@ export async function optimizeImageFile(
     return { w: Math.max(1, Math.round(maxDim * ratio)), h: maxDim };
   };
 
-  // Prefer WebP (supports alpha & superior compression); fallback to JPEG or PNG if browser lacks WebP encoding
+  // Prefer WebP (supports alpha & superior compression); fallback to PNG or JPEG if needed
   let selectedMime: 'image/webp' | 'image/jpeg' | 'image/png' = 'image/webp';
-  const probe = encode(2, 2, 'image/webp', 0.8);
+  const probe = encode(2, 2, 'image/webp', 0.85);
   if (!probe.startsWith('data:image/webp')) {
     selectedMime = preserveTransparency ? 'image/png' : 'image/jpeg';
   }
 
   let dims = scaleToMax(width, height, maxDimension);
-  let quality = 0.84;
+  let quality = 0.88;
   let dataUrl = encode(dims.w, dims.h, selectedMime, quality);
 
-  // Iteratively optimize to guarantee fast loading and safe Firestore persistence
+  const estimateBytes = (url: string) => {
+    const base64Body = url.split(',')[1] || '';
+    return Math.round((base64Body.length * 3) / 4);
+  };
+
+  // Keep output lightweight for fast CDN delivery while preserving high photographic fidelity
   let attempts = 0;
-  while (dataUrl.length > TARGET_MAX_DATAURL_CHARS && attempts < 8) {
+  while (estimateBytes(dataUrl) > TARGET_MAX_BINARY_BYTES && attempts < 6) {
     attempts += 1;
-    if (quality > 0.56 && selectedMime !== 'image/png') {
-      quality = Math.max(0.54, quality - 0.1);
+    if (quality > 0.68 && selectedMime !== 'image/png') {
+      quality = Math.max(0.65, quality - 0.08);
     } else {
-      maxDimension = Math.max(480, Math.round(maxDimension * 0.8));
+      maxDimension = Math.max(800, Math.round(maxDimension * 0.82));
       dims = scaleToMax(width, height, maxDimension);
     }
     dataUrl = encode(dims.w, dims.h, selectedMime, quality);
   }
 
-  if (dataUrl.length > 740000) {
-    throw new Error(
-      'A imagem continua muito pesada após otimização automática. Tente reduzir a resolução antes do envio.'
-    );
+  const sizeBytes = estimateBytes(dataUrl);
+  if (sizeBytes > MAX_INPUT_SIZE_BYTES) {
+    throw new Error('A imagem otimizada excede o limite de 15 MB permitido pelo bucket fmot-media.');
   }
-
-  const base64Body = dataUrl.split(',')[1] || '';
-  const sizeBytes = Math.round((base64Body.length * 3) / 4);
 
   return {
     fileName: file.name.slice(0, 180),

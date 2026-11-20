@@ -31,7 +31,9 @@ export {
   deleteSupabaseOperation,
   fetchSupabaseMediaAssets,
   fetchSupabasePortalSnapshot,
+  findSupabaseMediaAssetByStoragePath,
   mapMediaAssetRow,
+  updateSupabaseReferencesUrl,
   upsertSupabaseGalleryItem,
   upsertSupabaseHierarchyMember,
   upsertSupabaseHierarchyNode,
@@ -43,9 +45,11 @@ export {
   type SupabasePortalSnapshot,
 } from './repository';
 export {
+  buildDeduplicatedStoragePath,
   deleteImageFromSupabaseStorage,
   getSupabaseStoragePublicUrl,
   uploadImageToSupabaseStorage,
+  verifySupabasePublicImageUrl,
   type SupabaseUploadedMedia,
 } from './storage';
 export { SUPABASE_MEDIA_BUCKET, type Database } from './types';

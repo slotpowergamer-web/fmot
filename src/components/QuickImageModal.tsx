@@ -4,8 +4,14 @@ import { usePortal } from '../context/PortalContext';
 import { formatFileSize, optimizeImageFile, OptimizedImageResult } from '../utils/imageOptimizer';
 
 export const QuickImageModal: React.FC = () => {
-  const { quickImageTarget, closeQuickImageEditor, uploadMediaAsset, resolveMediaUrl, showToast } =
-    usePortal();
+  const {
+    quickImageTarget,
+    closeQuickImageEditor,
+    uploadMediaAsset,
+    resolveMediaUrl,
+    showToast,
+    supabaseReadyForWrites,
+  } = usePortal();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [optimized, setOptimized] = useState<OptimizedImageResult | null>(null);
@@ -27,7 +33,7 @@ export const QuickImageModal: React.FC = () => {
     try {
       const result = await optimizeImageFile(file, {
         preserveTransparency: quickImageTarget.preserveTransparency,
-        maxDimension: quickImageTarget.preserveTransparency ? 1024 : 1400,
+        maxDimension: quickImageTarget.preserveTransparency ? 1200 : 1920,
       });
       setOptimized(result);
       setExternalUrl('');
@@ -203,6 +209,13 @@ export const QuickImageModal: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {!supabaseReadyForWrites && (
+            <div className="border border-[#8BAA43]/60 bg-[#263F24]/25 px-4 py-2.5 text-xs text-[#F1F3EC]">
+              Conecte sua sessão administrativa do Supabase no topo do Painel Administrativo para
+              habilitar envios diretos ao bucket <span className="font-mono">fmot-media</span>.
+            </div>
+          )}
 
           {error && (
             <div className="border border-[#D62828]/60 bg-[#D62828]/10 px-4 py-2.5 text-xs text-[#F1F3EC]">

@@ -291,6 +291,122 @@ export async function fetchSupabaseMediaAssets(): Promise<MediaAsset[]> {
   return data.map(mapMediaAssetRow);
 }
 
+export async function findSupabaseMediaAssetByStoragePath(
+  storagePath: string
+): Promise<MediaAsset | null> {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase || !storagePath) return null;
+  const { data, error } = await supabase
+    .from('media_assets')
+    .select('*')
+    .eq('storage_path', storagePath)
+    .maybeSingle();
+  if (error || !data) return null;
+  return mapMediaAssetRow(data);
+}
+
+/**
+ * Updates any public section records in Supabase whose image reference pointed to `oldUrl`
+ * (or `media://<assetId>`) so replacing an image in the Acervo updates all pages immediately.
+ */
+export async function updateSupabaseReferencesUrl(
+  oldUrl: string,
+  newUrl: string,
+  assetId?: string
+): Promise<void> {
+  if (!newUrl || (!oldUrl && !assetId)) return;
+  const supabase = requireSupabaseBrowserClient();
+  const matches = new Set<string>([oldUrl, assetId ? `media://${assetId}` : ''].filter(Boolean));
+  const now = new Date().toISOString();
+
+  const [slotsRes, nodesRes, membersRes, rolesRes, opsRes, galRes] = await Promise.all([
+    supabase.from('portal_slots').select('id, image_url, media_asset_id'),
+    supabase.from('hierarchy_nodes').select('id, photo_url, insignia_url'),
+    supabase.from('hierarchy_members').select('id, photo_url'),
+    supabase.from('roles_catalog').select('id, image_url'),
+    supabase.from('operations_records').select('id, cover_image_url, gallery_urls'),
+    supabase.from('gallery_items').select('id, image_url'),
+  ]);
+
+  const tasks: PromiseLike<unknown>[] = [];
+
+  (slotsRes.data || []).forEach((row) => {
+    if (matches.has(row.image_url) || (assetId && row.media_asset_id === assetId)) {
+      tasks.push(
+        supabase
+          .from('portal_slots')
+          .update({ image_url: newUrl, updated_at: now })
+          .eq('id', row.id)
+      );
+    }
+  });
+
+  (nodesRes.data || []).forEach((row) => {
+    const patch: { photo_url?: string; insignia_url?: string; updated_at?: string } = {};
+    if (row.photo_url && matches.has(row.photo_url)) patch.photo_url = newUrl;
+    if (row.insignia_url && matches.has(row.insignia_url)) patch.insignia_url = newUrl;
+    if (Object.keys(patch).length > 0) {
+      patch.updated_at = now;
+      tasks.push(supabase.from('hierarchy_nodes').update(patch).eq('id', row.id));
+    }
+  });
+
+  (membersRes.data || []).forEach((row) => {
+    if (matches.has(row.photo_url)) {
+      tasks.push(
+        supabase
+          .from('hierarchy_members')
+          .update({ photo_url: newUrl, updated_at: now })
+          .eq('id', row.id)
+      );
+    }
+  });
+
+  (rolesRes.data || []).forEach((row) => {
+    if (row.image_url && matches.has(row.image_url)) {
+      tasks.push(
+        supabase
+          .from('roles_catalog')
+          .update({ image_url: newUrl, updated_at: now })
+          .eq('id', row.id)
+      );
+    }
+  });
+
+  (opsRes.data || []).forEach((row) => {
+    const coverHit = matches.has(row.cover_image_url);
+    const urls = Array.isArray(row.gallery_urls) ? row.gallery_urls : [];
+    const galHit = urls.some((u) => matches.has(u));
+    if (coverHit || galHit) {
+      tasks.push(
+        supabase
+          .from('operations_records')
+          .update({
+            cover_image_url: coverHit ? newUrl : row.cover_image_url,
+            gallery_urls: galHit ? urls.map((u) => (matches.has(u) ? newUrl : u)) : urls,
+            updated_at: now,
+          })
+          .eq('id', row.id)
+      );
+    }
+  });
+
+  (galRes.data || []).forEach((row) => {
+    if (matches.has(row.image_url)) {
+      tasks.push(
+        supabase
+          .from('gallery_items')
+          .update({ image_url: newUrl, updated_at: now })
+          .eq('id', row.id)
+      );
+    }
+  });
+
+  if (tasks.length > 0) {
+    await Promise.all(tasks);
+  }
+}
+
 async function getCurrentSupabaseUserId(): Promise<string | null> {
   const supabase = getSupabaseBrowserClient();
   if (!supabase) return null;

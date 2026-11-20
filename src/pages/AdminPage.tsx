@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
+  Database,
   ExternalLink,
   Eye,
   Image as ImageIcon,
@@ -8,6 +9,7 @@ import {
   Lock,
   LogOut,
   Pencil,
+  RefreshCw,
   RotateCcw,
   ShieldAlert,
   Trash2,
@@ -19,7 +21,7 @@ import { AdminSupabaseMigrationPanel } from '../components/admin/AdminSupabaseMi
 import { MediaImage } from '../components/MediaImage';
 import { usePortal } from '../context/PortalContext';
 import { ManagedPageKey, PortalConfig, PortalSlot } from '../types/portal';
-import { formatFileSize } from '../utils/imageOptimizer';
+import { formatFileSize, optimizeImageFile } from '../utils/imageOptimizer';
 
 type AdminTab = 'hierarquia' | 'imagens_paginas' | Exclude<AdminRecordSection, 'hierarquia'> | 'textos_config' | 'acervo_midia';
 
@@ -50,6 +52,8 @@ export const AdminPage: React.FC = () => {
     savePortalConfig,
     mediaAssets,
     hierarchyMembers,
+    uploadMediaAsset,
+    replaceMediaAsset,
     deleteMediaAsset,
     openQuickImageEditor,
     resolveMediaUrl,
@@ -59,6 +63,8 @@ export const AdminPage: React.FC = () => {
     quotaUpgradeUrl,
     supabaseAdminEmail,
     supabaseReadyForWrites,
+    signInSupabaseAdmin,
+    showToast,
   } = usePortal();
 
   const [adminTab, setAdminTab] = useState<AdminTab>('hierarquia');
@@ -70,6 +76,22 @@ export const AdminPage: React.FC = () => {
   const [savingConfig, setSavingConfig] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ url: string; title: string } | null>(null);
 
+  // Direct Supabase Admin login state (used on Login Gate and inline session banner)
+  const [sbEmail, setSbEmail] = useState('slotpowergamer@gmail.com');
+  const [sbPassword, setSbPassword] = useState('');
+  const [sbSigningIn, setSbSigningIn] = useState(false);
+  const [sbLoginError, setSbLoginError] = useState<string | null>(null);
+
+  // Acervo direct upload / replace / delete state
+  const [acervoUploadPage, setAcervoUploadPage] = useState<ManagedPageKey>('galeria');
+  const [uploadingAcervo, setUploadingAcervo] = useState(false);
+  const [replacingAssetId, setReplacingAssetId] = useState<string | null>(null);
+  const [deletingAssetId, setDeletingAssetId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const acervoUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const replaceInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingReplaceTargetRef = useRef<string | null>(null);
+
   useEffect(() => {
     setDraftConfig(config);
   }, [config]);
@@ -79,6 +101,74 @@ export const AdminPage: React.FC = () => {
       void loadFullMediaLibrary();
     }
   }, [isAdmin, adminTab, loadFullMediaLibrary]);
+
+  const handleSupabaseLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSbSigningIn(true);
+    setSbLoginError(null);
+    try {
+      await signInSupabaseAdmin(sbEmail, sbPassword);
+      setSbPassword('');
+    } catch (err) {
+      setSbLoginError(
+        err instanceof Error ? err.message : 'Falha ao autenticar conta administrativa no Supabase.'
+      );
+    } finally {
+      setSbSigningIn(false);
+    }
+  };
+
+  const handleAcervoDirectUpload = async (file: File | undefined) => {
+    if (!file) return;
+    setUploadingAcervo(true);
+    try {
+      const optimized = await optimizeImageFile(file, {
+        preserveTransparency: acervoUploadPage === 'identidade',
+        maxDimension: acervoUploadPage === 'identidade' ? 1200 : 1920,
+      });
+      await uploadMediaAsset(optimized, {
+        page: acervoUploadPage,
+        title: file.name.replace(/\.[^.]+$/, ''),
+      });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erro ao enviar imagem para o Supabase.', 'error');
+    } finally {
+      setUploadingAcervo(false);
+      if (acervoUploadInputRef.current) acervoUploadInputRef.current.value = '';
+    }
+  };
+
+  const handleAcervoReplaceFile = async (file: File | undefined) => {
+    const targetId = pendingReplaceTargetRef.current;
+    if (!file || !targetId) return;
+    const existing = mediaAssets.find((item) => item.id === targetId);
+    setReplacingAssetId(targetId);
+    try {
+      const optimized = await optimizeImageFile(file, {
+        preserveTransparency: existing?.page === 'identidade',
+        maxDimension: existing?.page === 'identidade' ? 1200 : 1920,
+      });
+      await replaceMediaAsset(targetId, optimized);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erro ao substituir imagem no Supabase.', 'error');
+    } finally {
+      setReplacingAssetId(null);
+      pendingReplaceTargetRef.current = null;
+      if (replaceInputRef.current) replaceInputRef.current.value = '';
+    }
+  };
+
+  const handleAcervoDelete = async (assetId: string) => {
+    setDeletingAssetId(assetId);
+    try {
+      await deleteMediaAsset(assetId);
+      setConfirmDeleteId(null);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erro ao excluir imagem do Supabase.', 'error');
+    } finally {
+      setDeletingAssetId(null);
+    }
+  };
 
   const handleSlotMetaSave = async (slot: PortalSlot) => {
     const edited = slotEdits[slot.id];
@@ -98,7 +188,7 @@ export const AdminPage: React.FC = () => {
   }
 
   // Protected Login Gate
-  const activeAdminEmail = user?.email || supabaseAdminEmail || '';
+  const activeAdminEmail = supabaseAdminEmail || user?.email || '';
   if (!isAdmin || !activeAdminEmail) {
     return (
       <div className="mx-auto max-w-xl px-6 py-24">
@@ -111,9 +201,9 @@ export const AdminPage: React.FC = () => {
             Gerenciamento de Imagens e Hierarquia
           </h1>
           <p className="mt-3 text-sm leading-relaxed text-[#A5AAA2]">
-            Acesso exclusivo para administradores autorizados da 1.F.M.O.T. Visitantes visualizam
-            o portal publicado, enquanto o gerenciamento de fotografias e textos oficiais requer
-            autenticação verificada.
+            Acesso exclusivo para administradores autorizados da 1.F.M.O.T. Entre com sua conta
+            administrativa do Supabase para enviar, substituir e gerenciar fotografias diretamente
+            no bucket <span className="font-mono text-[#F1F3EC]">fmot-media</span>.
           </p>
 
           {user && !isAdmin && (
@@ -128,32 +218,80 @@ export const AdminPage: React.FC = () => {
             </div>
           )}
 
-          {authError && (
+          {(sbLoginError || authError) && (
             <div className="mt-5 border border-[#D62828]/60 bg-[#D62828]/10 p-3.5 text-xs text-[#F1F3EC]">
-              {authError}
+              {sbLoginError || authError}
             </div>
           )}
 
-          <div className="mt-8 flex flex-wrap items-center gap-3">
+          {/* Primary Login: Supabase Admin (E-mail + Senha) */}
+          <form onSubmit={(e) => void handleSupabaseLoginSubmit(e)} className="mt-7 space-y-3.5">
+            <p className="font-mono text-[11px] tracking-[0.18em] text-[#8BAA43]">
+              ACESSO PRINCIPAL · SUPABASE STORAGE (fmot-media)
+            </p>
+            <div>
+              <label className="block text-xs text-[#A5AAA2]">E-mail administrativo</label>
+              <input
+                type="email"
+                required
+                value={sbEmail}
+                onChange={(e) => setSbEmail(e.target.value)}
+                placeholder="slotpowergamer@gmail.com"
+                className="mt-1 w-full border border-[#263F24] bg-[#050705] px-3.5 py-2.5 text-sm text-[#F1F3EC] focus:border-[#8BAA43] focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-[#A5AAA2]">Senha no Supabase Auth</label>
+              <input
+                type="password"
+                required
+                value={sbPassword}
+                onChange={(e) => setSbPassword(e.target.value)}
+                placeholder="Digite sua senha de administrador"
+                className="mt-1 w-full border border-[#263F24] bg-[#050705] px-3.5 py-2.5 text-sm text-[#F1F3EC] focus:border-[#8BAA43] focus:outline-none"
+              />
+            </div>
             <button
-              type="button"
-              onClick={() => void signInAdmin()}
-              className="inline-flex items-center gap-2.5 bg-[#526B32] px-6 py-3 text-xs font-semibold tracking-wider text-[#F1F3EC] transition-colors hover:bg-[#8BAA43] hover:text-[#050705] whitespace-nowrap shrink-0"
+              type="submit"
+              disabled={sbSigningIn}
+              className="inline-flex w-full items-center justify-center gap-2.5 bg-[#526B32] px-6 py-3 text-xs font-semibold tracking-wider text-[#F1F3EC] transition-colors hover:bg-[#8BAA43] hover:text-[#050705] disabled:opacity-50"
             >
-              <Lock className="h-4 w-4" />
-              ENTRAR COM CONTA GOOGLE AUTORIZADA
+              {sbSigningIn ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Database className="h-4 w-4" />
+              )}
+              {sbSigningIn ? 'AUTENTICANDO NO SUPABASE...' : 'ENTRAR NO PAINEL COM SUPABASE'}
             </button>
+          </form>
 
-            {user && (
+          {/* Secondary Login: Google Account (for Firebase backup inspection) */}
+          <div className="mt-6 border-t border-[#263F24]/50 pt-5">
+            <p className="mb-3 text-[11px] text-[#A5AAA2]">
+              Ou acesse via conta Google autorizada (necessária apenas para inspecionar o backup do
+              Firebase):
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
-                onClick={() => void signOutAdmin()}
-                className="inline-flex items-center gap-2 border border-[#263F24] px-4 py-3 text-xs text-[#A5AAA2] hover:border-[#8BAA43] hover:text-[#F1F3EC]"
+                onClick={() => void signInAdmin()}
+                className="inline-flex items-center gap-2.5 border border-[#263F24] bg-[#050705] px-5 py-2.5 text-xs font-semibold tracking-wider text-[#F1F3EC] transition-colors hover:border-[#8BAA43] whitespace-nowrap shrink-0"
               >
-                <LogOut className="h-4 w-4" />
-                Trocar Conta
+                <Lock className="h-3.5 w-3.5 text-[#8BAA43]" />
+                ENTRAR COM CONTA GOOGLE AUTORIZADA
               </button>
-            )}
+
+              {user && (
+                <button
+                  type="button"
+                  onClick={() => void signOutAdmin()}
+                  className="inline-flex items-center gap-2 border border-[#263F24] px-4 py-2.5 text-xs text-[#A5AAA2] hover:border-[#8BAA43] hover:text-[#F1F3EC]"
+                >
+                  <LogOut className="h-4 w-4" />
+                  Trocar Conta
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -214,20 +352,72 @@ export const AdminPage: React.FC = () => {
         </div>
       </header>
 
-      {/* Admin-Only Firestore Quota Notice */}
-      {quotaExceeded && (
+      {/* Inline Supabase Session Connector when admin entered via Google without Supabase Auth */}
+      {!supabaseAdminEmail && (
+        <form
+          onSubmit={(e) => void handleSupabaseLoginSubmit(e)}
+          className="space-y-3 border border-[#8BAA43]/60 bg-[#0B100C] p-5"
+        >
+          <div className="flex items-start gap-3">
+            <Database className="mt-0.5 h-4 w-4 shrink-0 text-[#8BAA43]" />
+            <div className="text-xs">
+              <p className="font-semibold text-[#F1F3EC]">
+                Conecte sua sessão Supabase para liberar uploads diretos no bucket fmot-media
+              </p>
+              <p className="mt-0.5 text-[#A5AAA2]">
+                Todas as novas imagens e edições são salvas diretamente no Supabase Storage e
+                PostgreSQL, sem depender do Firebase.
+              </p>
+            </div>
+          </div>
+          {sbLoginError && (
+            <div className="border border-[#D62828]/60 bg-[#D62828]/10 px-3 py-2 text-xs text-[#F1F3EC]">
+              {sbLoginError}
+            </div>
+          )}
+          <div className="grid gap-3 sm:grid-cols-3">
+            <input
+              type="email"
+              required
+              value={sbEmail}
+              onChange={(e) => setSbEmail(e.target.value)}
+              placeholder="E-mail admin no Supabase"
+              className="border border-[#263F24] bg-[#050705] px-3 py-2 text-xs text-[#F1F3EC]"
+            />
+            <input
+              type="password"
+              required
+              value={sbPassword}
+              onChange={(e) => setSbPassword(e.target.value)}
+              placeholder="Senha da conta no Supabase Auth"
+              className="border border-[#263F24] bg-[#050705] px-3 py-2 text-xs text-[#F1F3EC]"
+            />
+            <button
+              type="submit"
+              disabled={sbSigningIn}
+              className="inline-flex items-center justify-center gap-2 bg-[#526B32] px-4 py-2 text-xs font-semibold text-[#F1F3EC] transition-colors hover:bg-[#8BAA43] hover:text-[#050705] disabled:opacity-50"
+            >
+              {sbSigningIn ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Lock className="h-3.5 w-3.5" />}
+              Conectar Sessão Supabase
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Admin-Only Firestore Quota Notice (shown only when Supabase does not hold primary data yet) */}
+      {quotaExceeded && !supabaseReadyForWrites && (
         <div className="flex flex-col justify-between gap-4 border border-[#8BAA43]/60 bg-[#0B100C] p-5 sm:flex-row sm:items-center">
           <div className="flex items-start gap-3">
             <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-[#8BAA43]" />
             <div className="space-y-1 text-xs">
               <p className="font-semibold text-[#F1F3EC]">
-                Limite diário gratuito de leituras do Firestore atingido
+                Limite diário gratuito de leituras do Firestore atingido (backup legado)
               </p>
               <p className="leading-relaxed text-[#A5AAA2]">
-                Suas fotografias continuam salvas com segurança no banco de dados e voltarão a
-                carregar automaticamente quando a cota diária reiniciar amanhã ou após o upgrade do
-                banco de dados. O cache local foi ativado para manter as imagens salvas no navegador
-                assim que carregadas.
+                As novas fotografias enviadas pelo painel administrativo são gravadas diretamente no
+                Supabase Storage (<span className="font-mono text-[#F1F3EC]">fmot-media</span>) e
+                não dependem do Firebase. Os registros antigos do Firebase permanecem preservados
+                como backup.
               </p>
             </div>
           </div>
@@ -569,13 +759,61 @@ export const AdminPage: React.FC = () => {
         <div className="space-y-6">
           <AdminSupabaseMigrationPanel />
 
-          <div className="border-b border-[#263F24]/45 pb-4">
-            <h2 className="font-display text-3xl font-bold text-[#F1F3EC]">
-              Acervo Persistente de Fotografias ({mediaAssets.length})
-            </h2>
-            <p className="text-xs text-[#A5AAA2]">
-              Imagens otimizadas armazenadas permanentemente no banco de dados.
-            </p>
+          <input
+            ref={acervoUploadInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => void handleAcervoDirectUpload(e.target.files?.[0])}
+            className="hidden"
+          />
+          <input
+            ref={replaceInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => void handleAcervoReplaceFile(e.target.files?.[0])}
+            className="hidden"
+          />
+
+          <div className="flex flex-wrap items-end justify-between gap-4 border-b border-[#263F24]/45 pb-4">
+            <div>
+              <h2 className="font-display text-3xl font-bold text-[#F1F3EC]">
+                Acervo Persistente de Fotografias ({mediaAssets.length})
+              </h2>
+              <p className="text-xs text-[#A5AAA2]">
+                Envie, substitua ou exclua fotografias individualmente no bucket{' '}
+                <span className="font-mono text-[#F1F3EC]">fmot-media</span> (Supabase Storage).
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <select
+                value={acervoUploadPage}
+                onChange={(e) => setAcervoUploadPage(e.target.value as ManagedPageKey)}
+                disabled={uploadingAcervo}
+                aria-label="Seção de destino da imagem"
+                className="border border-[#263F24] bg-[#050705] px-3 py-2 text-xs text-[#F1F3EC]"
+              >
+                {(Object.keys(PAGE_LABELS) as ManagedPageKey[]).map((key) => (
+                  <option key={key} value={key}>
+                    {PAGE_LABELS[key]}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                disabled={uploadingAcervo || !supabaseReadyForWrites}
+                onClick={() => acervoUploadInputRef.current?.click()}
+                className="inline-flex items-center gap-2 bg-[#526B32] px-4 py-2 text-xs font-semibold text-[#F1F3EC] transition-colors hover:bg-[#8BAA43] hover:text-[#050705] disabled:cursor-not-allowed disabled:opacity-45 whitespace-nowrap"
+              >
+                {uploadingAcervo ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Upload className="h-3.5 w-3.5" />
+                )}
+                {uploadingAcervo ? 'ENVIANDO PARA fmot-media...' : '+ ENVIAR IMAGEM AO SUPABASE'}
+              </button>
+            </div>
           </div>
 
           {loadingMediaLibrary && mediaAssets.length === 0 ? (
@@ -589,55 +827,129 @@ export const AdminPage: React.FC = () => {
             <div className="flex flex-col items-center justify-center border border-[#263F24]/50 bg-[#050705] py-16 text-center">
               <ImageIcon className="h-8 w-8 text-[#526B32]" />
               <p className="mt-3 text-sm font-semibold text-[#F1F3EC]">
-                Nenhuma fotografia carregada no momento.
+                Nenhuma fotografia registrada no bucket fmot-media ainda.
               </p>
               <p className="mt-1 text-xs text-[#A5AAA2]">
-                Use as abas acima ou ative a Edição Direta nas Páginas para enviar suas fotografias.
+                Use o botão acima ou qualquer aba do painel administrativo para enviar suas
+                fotografias diretamente ao Supabase Storage.
               </p>
             </div>
           ) : (
             <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {mediaAssets.map((asset) => (
-                <div key={asset.id} className="space-y-3 border-b border-[#263F24]/45 pb-5">
-                  <div className="aspect-[4/3] bg-[#050705]">
-                    <img
-                      src={asset.dataUrl}
-                      alt={asset.title}
-                      referrerPolicy="no-referrer"
-                      className="h-full w-full object-cover"
-                    />
-                  </div>
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="font-mono text-[10px] text-[#8BAA43]">
-                        {PAGE_LABELS[asset.page]} · {asset.width}×{asset.height}px
-                      </p>
-                      <h3 className="truncate font-display text-base font-bold text-[#F1F3EC]">
-                        {asset.title}
-                      </h3>
-                      <p className="font-mono text-[10px] text-[#A5AAA2] tabular-nums">
-                        {formatFileSize(asset.sizeBytes)}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setPreviewImage({ url: asset.dataUrl, title: asset.title })}
-                        className="flex h-8 w-8 items-center justify-center border border-[#263F24] text-[#A5AAA2] hover:text-[#F1F3EC]"
+              {mediaAssets.map((asset) => {
+                const displayUrl = asset.publicUrl || asset.dataUrl;
+                const isSupabaseAsset = asset.source === 'supabase' || Boolean(asset.storagePath);
+                const isBusy = replacingAssetId === asset.id || deletingAssetId === asset.id;
+
+                return (
+                  <div key={asset.id} className="space-y-3 border-b border-[#263F24]/45 pb-5">
+                    <div className="relative aspect-[4/3] bg-[#050705]">
+                      <img
+                        src={displayUrl}
+                        alt={asset.title}
+                        loading="lazy"
+                        decoding="async"
+                        referrerPolicy="no-referrer"
+                        className="h-full w-full object-cover"
+                      />
+                      <span
+                        className={`absolute left-2 top-2 px-2 py-0.5 font-mono text-[10px] ${
+                          isSupabaseAsset
+                            ? 'bg-[#0B100C]/90 text-[#8BAA43] border border-[#526B32]/70'
+                            : 'bg-[#0B100C]/90 text-[#A5AAA2] border border-[#263F24]'
+                        }`}
                       >
-                        <Eye className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void deleteMediaAsset(asset.id)}
-                        className="flex h-8 w-8 items-center justify-center border border-[#D62828]/40 text-[#D62828] hover:bg-[#D62828]/15"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                        {isSupabaseAsset ? 'Supabase · fmot-media' : 'Backup Firebase'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-mono text-[10px] text-[#8BAA43]">
+                          {PAGE_LABELS[asset.page]} · {asset.width}×{asset.height}px
+                        </p>
+                        <h3 className="truncate font-display text-base font-bold text-[#F1F3EC]">
+                          {asset.title}
+                        </h3>
+                        <p className="font-mono text-[10px] text-[#A5AAA2] tabular-nums">
+                          {formatFileSize(asset.sizeBytes)}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          title="Visualizar em tamanho real"
+                          onClick={() => setPreviewImage({ url: displayUrl, title: asset.title })}
+                          className="flex h-8 w-8 items-center justify-center border border-[#263F24] text-[#A5AAA2] hover:border-[#8BAA43] hover:text-[#F1F3EC]"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
+
+                        {isSupabaseAsset && (
+                          <button
+                            type="button"
+                            disabled={isBusy || !supabaseReadyForWrites}
+                            title="Substituir imagem no Supabase Storage"
+                            onClick={() => {
+                              pendingReplaceTargetRef.current = asset.id;
+                              replaceInputRef.current?.click();
+                            }}
+                            className="flex h-8 w-8 items-center justify-center border border-[#526B32] text-[#8BAA43] hover:bg-[#263F24]/50 disabled:opacity-40"
+                          >
+                            {replacingAssetId === asset.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        )}
+
+                        {isSupabaseAsset ? (
+                          confirmDeleteId === asset.id ? (
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => void handleAcervoDelete(asset.id)}
+                                className="border border-[#D62828] bg-[#D62828]/20 px-2 py-1 text-[10px] font-semibold text-[#F1F3EC] hover:bg-[#D62828]"
+                              >
+                                {deletingAssetId === asset.id ? '...' : 'Confirmar'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteId(null)}
+                                className="border border-[#263F24] px-1.5 py-1 text-[10px] text-[#A5AAA2] hover:text-[#F1F3EC]"
+                              >
+                                Não
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={isBusy || !supabaseReadyForWrites}
+                              title="Excluir imagem do Supabase Storage"
+                              onClick={() => setConfirmDeleteId(asset.id)}
+                              className="flex h-8 w-8 items-center justify-center border border-[#D62828]/40 text-[#D62828] hover:bg-[#D62828]/15 disabled:opacity-40"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )
+                        ) : (
+                          <button
+                            type="button"
+                            disabled
+                            title="Imagem preservada no backup do Firebase (somente leitura)"
+                            className="flex h-8 w-8 cursor-not-allowed items-center justify-center border border-[#263F24]/50 text-[#A5AAA2]/40"
+                          >
+                            <Lock className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

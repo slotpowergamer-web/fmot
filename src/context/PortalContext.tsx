@@ -67,6 +67,7 @@ import {
 } from '../types/portal';
 import { dataUrlToBlob, OptimizedImageResult } from '../utils/imageOptimizer';
 import {
+  buildDeduplicatedStoragePath,
   checkSupabaseHealth,
   deleteImageFromSupabaseStorage,
   deleteSupabaseGalleryItem,
@@ -78,6 +79,7 @@ import {
   deleteSupabaseRole,
   fetchSupabaseMediaAssets,
   fetchSupabasePortalSnapshot,
+  findSupabaseMediaAssetByStoragePath,
   getSupabaseBrowserClient,
   inspectFirebaseMigrationSources,
   isSupabaseConfigured,
@@ -86,6 +88,7 @@ import {
   MigrationReport,
   RunMigrationOptions,
   SupabaseHealthStatus,
+  updateSupabaseReferencesUrl,
   uploadImageToSupabaseStorage,
   upsertSupabaseGalleryItem,
   upsertSupabaseHierarchyMember,
@@ -96,6 +99,7 @@ import {
   upsertSupabasePortalSlot,
   upsertSupabaseRole,
   verifySupabaseAdminSession,
+  verifySupabasePublicImageUrl,
 } from '../lib/supabase';
 
 export interface QuickImageTarget {
@@ -158,6 +162,11 @@ interface PortalContextValue {
   uploadMediaAsset: (
     optimized: OptimizedImageResult,
     meta: { page: ManagedPageKey; title: string; description?: string }
+  ) => Promise<{ assetId: string; refUrl: string; deduplicated?: boolean }>;
+  replaceMediaAsset: (
+    assetId: string,
+    optimized: OptimizedImageResult,
+    meta?: { title?: string; description?: string }
   ) => Promise<{ assetId: string; refUrl: string }>;
   deleteMediaAsset: (assetId: string) => Promise<void>;
   savePortalSlot: (slot: PortalSlot) => Promise<void>;
@@ -370,13 +379,15 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setSupabaseSchemaReady(snapshot.schemaReady);
       if (!snapshot.schemaReady) return;
 
+      // Supabase is live and readable: never let browser cache resurrect deleted Supabase media
+      serverLoadedKeysRef.current.add('media_assets');
+
       let hasPrimarySupabaseData = false;
 
       if (snapshot.mediaAssets.length > 0) {
         hasPrimarySupabaseData = true;
         supabasePrimaryKeysRef.current.add('media_assets');
         snapshot.mediaAssets.forEach((asset) => fetchedMediaIdsRef.current.add(asset.id));
-        mergeMediaAssets(snapshot.mediaAssets);
         void putCachedMediaAssets(snapshot.mediaAssets);
       }
       if (snapshot.config) {
@@ -430,7 +441,48 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         void putCachedSnapshot('gallery_items', snapshot.gallery);
       }
 
+      // Always reconcile Supabase media assets against live PostgreSQL (even when 0 rows remain)
+      const liveSupabaseIds = new Set(snapshot.mediaAssets.map((item) => item.id));
+      setMediaAssets((prev) => {
+        const removedSupabaseIds = prev
+          .filter((item) => item.source === 'supabase' && !liveSupabaseIds.has(item.id))
+          .map((item) => item.id);
+        removedSupabaseIds.forEach((removedId) => {
+          fetchedMediaIdsRef.current.delete(removedId);
+          void deleteCachedMediaAsset(removedId);
+        });
+
+        const legacyBackupOnly = prev.filter(
+          (item) => item.source !== 'supabase' && !liveSupabaseIds.has(item.id)
+        );
+        return [...snapshot.mediaAssets, ...legacyBackupOnly];
+      });
+
       if (hasPrimarySupabaseData) {
+        // Authoritative reconciliation: reflect exact live Supabase state (including deletions)
+        serverLoadedKeysRef.current.add('portal_slots');
+        serverLoadedKeysRef.current.add('hierarchy_nodes');
+        serverLoadedKeysRef.current.add('hierarchy_members');
+        serverLoadedKeysRef.current.add('roles_catalog');
+        serverLoadedKeysRef.current.add('operations_records');
+        serverLoadedKeysRef.current.add('gallery_items');
+
+        setCustomSlots(snapshot.slots);
+        setDbHierarchyMap(snapshot.hierarchyNodes);
+        setDbMembers(snapshot.hierarchyMembers);
+        setDbRoles(snapshot.roles);
+        setDbOperations(snapshot.operations);
+        setDbGallery(snapshot.gallery);
+
+        if (Object.keys(snapshot.slots).length === 0) void deleteCachedSnapshot('portal_slots');
+        if (Object.keys(snapshot.hierarchyNodes).length === 0) {
+          void deleteCachedSnapshot('hierarchy_nodes');
+        }
+        if (snapshot.hierarchyMembers.length === 0) void deleteCachedSnapshot('hierarchy_members');
+        if (!snapshot.roles) void deleteCachedSnapshot('roles_catalog');
+        if (!snapshot.operations) void deleteCachedSnapshot('operations_records');
+        if (!snapshot.gallery) void deleteCachedSnapshot('gallery_items');
+
         setSupabasePrimaryActive(true);
         setMembersLoaded(true);
         setLoadingData(false);
@@ -442,7 +494,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         setSupabaseChecked(true);
       }
     }
-  }, [mergeMediaAssets]);
+  }, []);
 
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
@@ -519,8 +571,13 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         if (cancelled || !isMountedRef.current) return;
 
         if (cachedMedia.length > 0) {
-          cachedMedia.forEach((asset) => fetchedMediaIdsRef.current.add(asset.id));
-          mergeMediaAssets(cachedMedia);
+          const safeCachedMedia = serverLoadedKeysRef.current.has('media_assets')
+            ? cachedMedia.filter((asset) => asset.source !== 'supabase')
+            : cachedMedia;
+          if (safeCachedMedia.length > 0) {
+            safeCachedMedia.forEach((asset) => fetchedMediaIdsRef.current.add(asset.id));
+            mergeMediaAssets(safeCachedMedia);
+          }
         }
         if (cachedConfig && !serverLoadedKeysRef.current.has('portal_config')) {
           setConfig(cachedConfig);
@@ -1013,14 +1070,22 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       try {
         if (supabaseSchemaReady) {
           const sbItems = await fetchSupabaseMediaAssets();
+          const liveIds = new Set(sbItems.map((item) => item.id));
+          sbItems.forEach((asset) => fetchedMediaIdsRef.current.add(asset.id));
+          if (isMountedRef.current) {
+            setMediaAssets((prev) => {
+              const legacyBackupOnly = prev.filter(
+                (item) => item.source !== 'supabase' && !liveIds.has(item.id)
+              );
+              return [...sbItems, ...legacyBackupOnly];
+            });
+          }
           if (sbItems.length > 0) {
-            sbItems.forEach((asset) => fetchedMediaIdsRef.current.add(asset.id));
-            if (isMountedRef.current) mergeMediaAssets(sbItems);
             void putCachedMediaAssets(sbItems);
           }
         }
 
-        if (!quotaExceeded) {
+        if (!supabasePrimaryActive && !quotaExceeded) {
           const snap = await getDocs(collection(db, 'media_assets'));
           const items = snap.docs.map((d) => ({ ...(d.data() as MediaAsset), id: d.id }));
           items.forEach((asset) => fetchedMediaIdsRef.current.add(asset.id));
@@ -1356,11 +1421,25 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     if (!isAdmin) {
       throw new Error('Operação restrita a administradores autenticados.');
     }
-    const uid = auth.currentUser?.uid || supabaseAdminUserId;
+    const uid = supabaseAdminUserId || auth.currentUser?.uid;
     if (!uid) {
       throw new Error('Operação restrita a administradores autenticados.');
     }
     return uid;
+  };
+
+  const assertSupabaseWriteReady = (): void => {
+    requireAdminUid();
+    if (!supabaseSchemaReady) {
+      throw new Error(
+        'As tabelas do Supabase ainda não estão disponíveis para gravação. Verifique a conexão no painel.'
+      );
+    }
+    if (!supabaseAdminUserId) {
+      throw new Error(
+        'Conecte sua sessão administrativa do Supabase (e-mail e senha) no topo do painel para enviar, substituir ou excluir imagens diretamente no bucket fmot-media.'
+      );
+    }
   };
 
   const ensureCollectionSeeded = async <T extends { id: string }>(
@@ -1389,113 +1468,192 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     async (
       optimized: OptimizedImageResult,
       meta: { page: ManagedPageKey; title: string; description?: string }
-    ) => {
-      const uid = requireAdminUid();
+    ): Promise<{ assetId: string; refUrl: string; deduplicated?: boolean }> => {
+      requireAdminUid();
       const assetId = sanitizeId(`img_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
       const cleanTitle = meta.title.trim().slice(0, 140) || optimized.fileName.slice(0, 140);
       const cleanDescription = (meta.description || '').trim().slice(0, 500);
       const cleanFileName = optimized.fileName.slice(0, 180);
 
-      // Primary storage path: Supabase Storage (`fmot-media`) + Postgres `media_assets`
-      if (supabaseReadyForWrites) {
+      // Mandatory primary path when Supabase is configured: NEVER write new images to Firebase Firestore
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         const blob = dataUrlToBlob(optimized.dataUrl, optimized.mimeType);
+
+        // 1. Deduplication check via deterministic SHA-256 storage path
+        const { storagePath: expectedPath } = await buildDeduplicatedStoragePath(blob, {
+          page: meta.page,
+          fileName: cleanFileName,
+          mimeType: optimized.mimeType,
+        });
+
+        const existingAsset = await findSupabaseMediaAssetByStoragePath(expectedPath);
+        if (existingAsset?.publicUrl) {
+          try {
+            await verifySupabasePublicImageUrl(existingAsset.publicUrl);
+            fetchedMediaIdsRef.current.add(existingAsset.id);
+            mergeMediaAssets([existingAsset]);
+            setSupabasePrimaryActive(true);
+            return {
+              assetId: existingAsset.id,
+              refUrl: existingAsset.publicUrl,
+              deduplicated: true,
+            };
+          } catch {
+            // File missing in Storage — proceed to fresh upload below
+          }
+        }
+
+        // 2. Real upload to bucket `fmot-media` + public HTTP verification
         const uploaded = await uploadImageToSupabaseStorage(blob, {
           page: meta.page,
           fileName: cleanFileName,
           mimeType: optimized.mimeType,
         });
-        const savedAsset = await upsertSupabaseMediaAsset({
-          id: assetId,
-          fileName: cleanFileName,
-          mimeType: uploaded.mimeType,
-          storagePath: uploaded.storagePath,
-          publicUrl: uploaded.publicUrl,
-          width: optimized.width,
-          height: optimized.height,
-          sizeBytes: uploaded.sizeBytes,
-          page: meta.page,
-          title: cleanTitle,
-          description: cleanDescription,
-        });
-        fetchedMediaIdsRef.current.add(assetId);
-        mergeMediaAssets([savedAsset]);
-        void putCachedMediaAsset(savedAsset);
-        return { assetId, refUrl: uploaded.publicUrl };
+
+        // 3. Persist metadata & public URL in PostgreSQL `public.media_assets` (rollback Storage on DB error)
+        try {
+          const savedAsset = await upsertSupabaseMediaAsset({
+            id: existingAsset?.id || assetId,
+            fileName: cleanFileName,
+            mimeType: uploaded.mimeType,
+            storagePath: uploaded.storagePath,
+            publicUrl: uploaded.publicUrl,
+            width: optimized.width,
+            height: optimized.height,
+            sizeBytes: uploaded.sizeBytes,
+            page: meta.page,
+            title: cleanTitle,
+            description: cleanDescription,
+          });
+          fetchedMediaIdsRef.current.add(savedAsset.id);
+          mergeMediaAssets([savedAsset]);
+          setSupabasePrimaryActive(true);
+          void putCachedMediaAsset(savedAsset);
+          return { assetId: savedAsset.id, refUrl: savedAsset.publicUrl || uploaded.publicUrl };
+        } catch (dbErr) {
+          try {
+            await deleteImageFromSupabaseStorage(uploaded.storagePath);
+          } catch {
+            // Ignore rollback cleanup failure
+          }
+          throw dbErr;
+        }
       }
 
-      // Preserved Firebase fallback while Supabase schema/auth is being finalized
-      const path = `media_assets/${assetId}`;
-      try {
-        await setDoc(doc(db, 'media_assets', assetId), {
-          fileName: cleanFileName,
-          mimeType: optimized.mimeType,
-          dataUrl: optimized.dataUrl,
-          width: optimized.width,
-          height: optimized.height,
-          sizeBytes: optimized.sizeBytes,
-          page: meta.page,
-          title: cleanTitle,
-          description: cleanDescription,
-          uploadedBy: uid,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        const newAsset: MediaAsset = {
-          id: assetId,
-          fileName: cleanFileName,
-          mimeType: optimized.mimeType,
-          dataUrl: optimized.dataUrl,
-          source: 'firebase',
-          width: optimized.width,
-          height: optimized.height,
-          sizeBytes: optimized.sizeBytes,
-          page: meta.page,
-          title: cleanTitle,
-          description: cleanDescription,
-          uploadedBy: uid,
-        };
-        fetchedMediaIdsRef.current.add(assetId);
-        mergeMediaAssets([newAsset]);
-        void putCachedMediaAsset(newAsset);
-        return { assetId, refUrl: `media://${assetId}` };
-      } catch (err) {
-        if (isQuotaExceededError(err)) setQuotaExceeded(true);
-        handleFirestoreError(err, OperationType.CREATE, path);
-      }
+      throw new Error('Supabase não está configurado neste ambiente para envio de imagens.');
     },
-    [isAdmin, mergeMediaAssets, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, mergeMediaAssets, supabaseAdminUserId, supabaseSchemaReady]
+  );
+
+  const replaceMediaAsset = useCallback(
+    async (
+      assetId: string,
+      optimized: OptimizedImageResult,
+      meta?: { title?: string; description?: string }
+    ): Promise<{ assetId: string; refUrl: string }> => {
+      assertSupabaseWriteReady();
+      const target = mediaAssets.find((item) => item.id === assetId);
+      if (!target) {
+        throw new Error('Imagem não encontrada no acervo do Supabase.');
+      }
+      if (target.source !== 'supabase' && !target.storagePath) {
+        throw new Error(
+          'Esta imagem pertence ao backup original do Firebase. Envie uma nova imagem no Supabase para preservar o backup intacto.'
+        );
+      }
+
+      const oldStoragePath = target.storagePath || '';
+      const oldPublicUrl = target.publicUrl || target.dataUrl || '';
+      const cleanFileName = optimized.fileName.slice(0, 180);
+      const cleanTitle = (meta?.title ?? target.title).trim().slice(0, 140) || cleanFileName;
+      const cleanDescription = (meta?.description ?? target.description ?? '').trim().slice(0, 500);
+
+      const blob = dataUrlToBlob(optimized.dataUrl, optimized.mimeType);
+      const uploaded = await uploadImageToSupabaseStorage(blob, {
+        page: target.page,
+        fileName: cleanFileName,
+        mimeType: optimized.mimeType,
+      });
+
+      const savedAsset = await upsertSupabaseMediaAsset({
+        id: assetId,
+        fileName: cleanFileName,
+        mimeType: uploaded.mimeType,
+        storagePath: uploaded.storagePath,
+        publicUrl: uploaded.publicUrl,
+        width: optimized.width,
+        height: optimized.height,
+        sizeBytes: uploaded.sizeBytes,
+        page: target.page,
+        title: cleanTitle,
+        description: cleanDescription,
+      });
+
+      // Update any slots / hierarchy / roles / operations / gallery referencing the replaced URL
+      if (oldPublicUrl && oldPublicUrl !== uploaded.publicUrl) {
+        await updateSupabaseReferencesUrl(oldPublicUrl, uploaded.publicUrl, assetId);
+      }
+
+      // Remove previous object from `fmot-media` if path changed and no other row uses it
+      if (oldStoragePath && oldStoragePath !== uploaded.storagePath) {
+        const stillReferenced = mediaAssets.some(
+          (item) => item.id !== assetId && item.storagePath === oldStoragePath
+        );
+        if (!stillReferenced) {
+          try {
+            await deleteImageFromSupabaseStorage(oldStoragePath);
+          } catch {
+            // Non-fatal cleanup error
+          }
+        }
+      }
+
+      fetchedMediaIdsRef.current.add(savedAsset.id);
+      mergeMediaAssets([savedAsset]);
+      void putCachedMediaAsset(savedAsset);
+      await hydrateFromSupabase();
+      showToast('Imagem substituída no Supabase Storage (fmot-media) e atualizada no site.', 'success');
+      return { assetId: savedAsset.id, refUrl: uploaded.publicUrl };
+    },
+    [
+      hydrateFromSupabase,
+      isAdmin,
+      mediaAssets,
+      mergeMediaAssets,
+      showToast,
+      supabaseAdminUserId,
+      supabaseSchemaReady,
+    ]
   );
 
   const deleteMediaAsset = useCallback(
     async (assetId: string) => {
-      requireAdminUid();
+      assertSupabaseWriteReady();
       const target = mediaAssets.find((item) => item.id === assetId);
 
-      if (target?.source === 'supabase' && supabaseReadyForWrites) {
-        if (target.storagePath) {
-          await deleteImageFromSupabaseStorage(target.storagePath);
-        }
-        await deleteSupabaseMediaAssetRow(assetId);
-        fetchedMediaIdsRef.current.delete(assetId);
-        setMediaAssets((prev) => prev.filter((item) => item.id !== assetId));
-        void deleteCachedMediaAsset(assetId);
-        showToast('Imagem removida do Supabase Storage.', 'success');
-        return;
+      if (target && target.source !== 'supabase' && !target.storagePath) {
+        throw new Error(
+          'Esta imagem pertence ao backup preservado do Firebase e não pode ser apagada por aqui.'
+        );
       }
 
-      const path = `media_assets/${assetId}`;
-      try {
-        await deleteDoc(doc(db, 'media_assets', assetId));
-        fetchedMediaIdsRef.current.delete(assetId);
-        setMediaAssets((prev) => prev.filter((item) => item.id !== assetId));
-        void deleteCachedMediaAsset(assetId);
-        showToast('Imagem removida do repositório persistente.', 'success');
-      } catch (err) {
-        if (isQuotaExceededError(err)) setQuotaExceeded(true);
-        handleFirestoreError(err, OperationType.DELETE, path);
+      if (target?.storagePath) {
+        const sharedByAnotherRow = mediaAssets.some(
+          (item) => item.id !== assetId && item.storagePath === target.storagePath
+        );
+        if (!sharedByAnotherRow) {
+          await deleteImageFromSupabaseStorage(target.storagePath);
+        }
       }
+
+      await deleteSupabaseMediaAssetRow(assetId);
+      fetchedMediaIdsRef.current.delete(assetId);
+      setMediaAssets((prev) => prev.filter((item) => item.id !== assetId));
+      void deleteCachedMediaAsset(assetId);
+      showToast('Imagem excluída permanentemente do Supabase Storage (fmot-media).', 'success');
     },
-    [isAdmin, mediaAssets, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, mediaAssets, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const savePortalSlot = useCallback(
@@ -1513,8 +1671,10 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         isCover: Boolean(slot.isCover),
       };
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         await upsertSupabasePortalSlot(normalizedSlot);
+        setSupabasePrimaryActive(true);
         setCustomSlots((prev) => {
           const next = { ...prev, [slotId]: normalizedSlot };
           void putCachedSnapshot('portal_slots', next);
@@ -1542,7 +1702,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.WRITE, path);
       }
     },
-    [isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const resetPortalSlot = useCallback(
@@ -1550,15 +1710,20 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       requireAdminUid();
       const cleanId = sanitizeId(slotId);
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         await deleteSupabasePortalSlot(cleanId);
         setCustomSlots((prev) => {
           const next = { ...prev };
           delete next[cleanId];
-          void putCachedSnapshot('portal_slots', next);
+          if (Object.keys(next).length > 0) {
+            void putCachedSnapshot('portal_slots', next);
+          } else {
+            void deleteCachedSnapshot('portal_slots');
+          }
           return next;
         });
-        showToast('Espaço restaurado ao estado padrão.', 'success');
+        showToast('Espaço restaurado ao estado padrão no Supabase.', 'success');
         return;
       }
 
@@ -1570,15 +1735,17 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.DELETE, path);
       }
     },
-    [isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const savePortalConfig = useCallback(
     async (nextConfig: PortalConfig) => {
       const uid = requireAdminUid();
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         await upsertSupabasePortalConfig(nextConfig);
+        setSupabasePrimaryActive(true);
         setConfig(nextConfig);
         void putCachedSnapshot('portal_config', nextConfig);
         showToast('Conteúdo institucional publicado com sucesso no Supabase.', 'success');
@@ -1603,7 +1770,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.WRITE, path);
       }
     },
-    [isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   // Each of the 6 ranks saves independently to its own document ID (rank_coronel..rank_recruta)
@@ -1612,14 +1779,16 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const uid = requireAdminUid();
       const nodeId = sanitizeId(node.id) as HierarchyRankId;
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         await upsertSupabaseHierarchyNode({ ...node, id: nodeId });
+        setSupabasePrimaryActive(true);
         setDbHierarchyMap((prev) => {
           const next = { ...prev, [nodeId]: { ...node, id: nodeId } };
           void putCachedSnapshot('hierarchy_nodes', next);
           return next;
         });
-        showToast(`Alterações da patente ${node.rankTitle} salvas permanentemente.`, 'success');
+        showToast(`Alterações da patente ${node.rankTitle} salvas permanentemente no Supabase.`, 'success');
         return;
       }
 
@@ -1644,19 +1813,25 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.WRITE, path);
       }
     },
-    [isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const deleteHierarchyNode = useCallback(
     async (nodeId: string) => {
       requireAdminUid();
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         await deleteSupabaseHierarchyNode(nodeId as HierarchyRankId);
+        setSupabasePrimaryActive(true);
         setDbHierarchyMap((prev) => {
           const next = { ...prev };
           delete next[nodeId];
-          void putCachedSnapshot('hierarchy_nodes', next);
+          if (Object.keys(next).length > 0) {
+            void putCachedSnapshot('hierarchy_nodes', next);
+          } else {
+            void deleteCachedSnapshot('hierarchy_nodes');
+          }
           return next;
         });
         showToast('Personalização da patente restaurada ao padrão oficial.', 'success');
@@ -1671,7 +1846,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.DELETE, path);
       }
     },
-    [isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const addHierarchyMember = useCallback(
@@ -1692,7 +1867,8 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const maxOrder = existingInRank.reduce((acc, m) => Math.max(acc, m.order || 0), 0);
       const nextOrder = Math.min(100000, maxOrder + 1);
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         const newMember: HierarchyMember = {
           id: memberId,
           rankId: input.rankId,
@@ -1703,12 +1879,13 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           order: nextOrder,
         };
         await upsertSupabaseHierarchyMember(newMember);
+        setSupabasePrimaryActive(true);
         setDbMembers((prev) => {
           const next = [...prev, newMember];
           void putCachedSnapshot('hierarchy_members', next);
           return next;
         });
-        showToast(`Integrante "${cleanName}" adicionado com sucesso.`, 'success');
+        showToast(`Integrante "${cleanName}" adicionado com sucesso no Supabase.`, 'success');
         return memberId;
       }
 
@@ -1731,7 +1908,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.CREATE, path);
       }
     },
-    [isAdmin, membersByRank, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, membersByRank, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const updateHierarchyMember = useCallback(
@@ -1767,7 +1944,8 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         nextOrder = Math.min(100000, maxOrder + 1);
       }
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         const updated: HierarchyMember = {
           id: cleanId,
           rankId: patch.rankId,
@@ -1778,6 +1956,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           order: Math.max(0, Math.min(100000, Number(nextOrder) || 0)),
         };
         await upsertSupabaseHierarchyMember(updated);
+        setSupabasePrimaryActive(true);
         setDbMembers((prev) => {
           const exists = prev.some((m) => m.id === cleanId);
           const next = exists ? prev.map((m) => (m.id === cleanId ? updated : m)) : [...prev, updated];
@@ -1786,8 +1965,8 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         });
         showToast(
           rankChanged
-            ? `Integrante "${cleanName}" atualizado e transferido de patente.`
-            : `Cadastro de "${cleanName}" salvo permanentemente.`,
+            ? `Integrante "${cleanName}" atualizado e transferido de patente no Supabase.`
+            : `Cadastro de "${cleanName}" salvo permanentemente no Supabase.`,
           'success'
         );
         return;
@@ -1829,7 +2008,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.UPDATE, path);
       }
     },
-    [dbMembers, isAdmin, membersByRank, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [dbMembers, isAdmin, membersByRank, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const transferHierarchyMember = useCallback(
@@ -1845,13 +2024,15 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         DEFAULT_HIERARCHY_NODES.find((r) => r.id === targetRankId)?.rankTitle || targetRankId;
       const nextOrder = Math.min(100000, maxOrder + 1);
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         const updated: HierarchyMember = {
           ...member,
           rankId: targetRankId,
           order: nextOrder,
         };
         await upsertSupabaseHierarchyMember(updated);
+        setSupabasePrimaryActive(true);
         setDbMembers((prev) => {
           const next = prev.map((m) => (m.id === cleanId ? updated : m));
           void putCachedSnapshot('hierarchy_members', next);
@@ -1874,14 +2055,15 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.UPDATE, path);
       }
     },
-    [hierarchyMembers, isAdmin, membersByRank, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [hierarchyMembers, isAdmin, membersByRank, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const reorderRankMembers = useCallback(
     async (_rankId: HierarchyRankId, orderedMembers: HierarchyMember[]) => {
       const uid = requireAdminUid();
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         await Promise.all(
           orderedMembers.map((member, idx) =>
             upsertSupabaseHierarchyMember({
@@ -1891,6 +2073,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             })
           )
         );
+        setSupabasePrimaryActive(true);
         const orderById = new Map<string, number>();
         orderedMembers.forEach((m, idx) => orderById.set(sanitizeId(m.id), idx + 1));
         setDbMembers((prev) => {
@@ -1900,7 +2083,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           void putCachedSnapshot('hierarchy_members', next);
           return next;
         });
-        showToast('Ordem dos integrantes atualizada.', 'success');
+        showToast('Ordem dos integrantes atualizada no Supabase.', 'success');
         return;
       }
 
@@ -1919,7 +2102,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.UPDATE, 'hierarchy_members');
       }
     },
-    [isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const deleteHierarchyMember = useCallback(
@@ -1927,14 +2110,20 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       requireAdminUid();
       const cleanId = sanitizeId(memberId);
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         await deleteSupabaseHierarchyMember(cleanId);
+        setSupabasePrimaryActive(true);
         setDbMembers((prev) => {
           const next = prev.filter((m) => m.id !== cleanId);
-          void putCachedSnapshot('hierarchy_members', next);
+          if (next.length > 0) {
+            void putCachedSnapshot('hierarchy_members', next);
+          } else {
+            void deleteCachedSnapshot('hierarchy_members');
+          }
           return next;
         });
-        showToast('Integrante excluído permanentemente da hierarquia.', 'success');
+        showToast('Integrante excluído permanentemente da hierarquia no Supabase.', 'success');
         return;
       }
 
@@ -1946,7 +2135,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.DELETE, path);
       }
     },
-    [isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const saveRoleSpecialty = useCallback(
@@ -1954,20 +2143,22 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const uid = requireAdminUid();
       const roleId = sanitizeId(role.id || `role_${Date.now()}`);
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         const currentList = dbRoles ?? DEFAULT_ROLES;
         if (dbRoles === null) {
           await Promise.all(DEFAULT_ROLES.map((item) => upsertSupabaseRole(item)));
         }
         const savedRole: RoleSpecialty = { ...role, id: roleId };
         await upsertSupabaseRole(savedRole);
+        setSupabasePrimaryActive(true);
         const nextList = [
           ...currentList.filter((r) => r.id !== roleId),
           savedRole,
         ].sort((a, b) => a.order - b.order);
         setDbRoles(nextList);
         void putCachedSnapshot('roles_catalog', nextList);
-        showToast('Função operacional salva com sucesso.', 'success');
+        showToast('Função operacional salva com sucesso no Supabase.', 'success');
         return;
       }
 
@@ -1998,24 +2189,26 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.WRITE, path);
       }
     },
-    [dbRoles, isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [dbRoles, isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const deleteRoleSpecialty = useCallback(
     async (roleId: string) => {
       const uid = requireAdminUid();
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         if (dbRoles === null) {
           await Promise.all(
             DEFAULT_ROLES.filter((r) => r.id !== roleId).map((item) => upsertSupabaseRole(item))
           );
         }
         await deleteSupabaseRole(roleId);
+        setSupabasePrimaryActive(true);
         const nextList = (dbRoles ?? DEFAULT_ROLES).filter((r) => r.id !== roleId);
         setDbRoles(nextList);
         void putCachedSnapshot('roles_catalog', nextList);
-        showToast('Função operacional removida.', 'success');
+        showToast('Função operacional removida no Supabase.', 'success');
         return;
       }
 
@@ -2028,7 +2221,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.DELETE, path);
       }
     },
-    [dbRoles, isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [dbRoles, isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const saveOperationRecord = useCallback(
@@ -2036,20 +2229,22 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const uid = requireAdminUid();
       const opId = sanitizeId(op.id || `op_${Date.now()}`);
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         const currentList = dbOperations ?? DEFAULT_OPERATIONS;
         if (dbOperations === null) {
           await Promise.all(DEFAULT_OPERATIONS.map((item) => upsertSupabaseOperation(item)));
         }
         const savedOp: OperationRecord = { ...op, id: opId };
         await upsertSupabaseOperation(savedOp);
+        setSupabasePrimaryActive(true);
         const nextList = [
           ...currentList.filter((o) => o.id !== opId),
           savedOp,
         ].sort((a, b) => a.order - b.order || b.date.localeCompare(a.date));
         setDbOperations(nextList);
         void putCachedSnapshot('operations_records', nextList);
-        showToast('Registro de operação salvo com sucesso.', 'success');
+        showToast('Registro de operação salvo com sucesso no Supabase.', 'success');
         return;
       }
 
@@ -2079,14 +2274,15 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.WRITE, path);
       }
     },
-    [dbOperations, isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [dbOperations, isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const deleteOperationRecord = useCallback(
     async (opId: string) => {
       const uid = requireAdminUid();
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         if (dbOperations === null) {
           await Promise.all(
             DEFAULT_OPERATIONS.filter((o) => o.id !== opId).map((item) =>
@@ -2095,10 +2291,11 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           );
         }
         await deleteSupabaseOperation(opId);
+        setSupabasePrimaryActive(true);
         const nextList = (dbOperations ?? DEFAULT_OPERATIONS).filter((o) => o.id !== opId);
         setDbOperations(nextList);
         void putCachedSnapshot('operations_records', nextList);
-        showToast('Registro de operação removido.', 'success');
+        showToast('Registro de operação removido no Supabase.', 'success');
         return;
       }
 
@@ -2111,7 +2308,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.DELETE, path);
       }
     },
-    [dbOperations, isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [dbOperations, isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const saveGalleryItem = useCallback(
@@ -2121,20 +2318,22 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         item.id || `gal_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
       );
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         const currentList = dbGallery ?? DEFAULT_GALLERY_ITEMS;
         if (dbGallery === null) {
           await Promise.all(DEFAULT_GALLERY_ITEMS.map((g) => upsertSupabaseGalleryItem(g)));
         }
         const savedItem: GalleryItem = { ...item, id: itemId };
         await upsertSupabaseGalleryItem(savedItem);
+        setSupabasePrimaryActive(true);
         const nextList = [
           ...currentList.filter((g) => g.id !== itemId),
           savedItem,
         ].sort((a, b) => a.order - b.order);
         setDbGallery(nextList);
         void putCachedSnapshot('gallery_items', nextList);
-        showToast('Fotografia salva na galeria.', 'success');
+        showToast('Fotografia salva na galeria no Supabase.', 'success');
         return;
       }
 
@@ -2158,14 +2357,15 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.WRITE, path);
       }
     },
-    [dbGallery, isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [dbGallery, isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const deleteGalleryItem = useCallback(
     async (itemId: string) => {
       const uid = requireAdminUid();
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         if (dbGallery === null) {
           await Promise.all(
             DEFAULT_GALLERY_ITEMS.filter((g) => g.id !== itemId).map((g) =>
@@ -2174,10 +2374,11 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           );
         }
         await deleteSupabaseGalleryItem(itemId);
+        setSupabasePrimaryActive(true);
         const nextList = (dbGallery ?? DEFAULT_GALLERY_ITEMS).filter((g) => g.id !== itemId);
         setDbGallery(nextList);
         void putCachedSnapshot('gallery_items', nextList);
-        showToast('Item removido da galeria.', 'success');
+        showToast('Item removido da galeria no Supabase.', 'success');
         return;
       }
 
@@ -2190,23 +2391,25 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.DELETE, path);
       }
     },
-    [dbGallery, isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [dbGallery, isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const reorderGalleryItems = useCallback(
     async (orderedItems: GalleryItem[]) => {
       const uid = requireAdminUid();
 
-      if (supabaseReadyForWrites) {
+      if (isSupabaseConfigured()) {
+        assertSupabaseWriteReady();
         const updated = orderedItems.map((item, idx) => ({
           ...item,
           id: sanitizeId(item.id),
           order: idx + 1,
         }));
         await Promise.all(updated.map((item) => upsertSupabaseGalleryItem(item)));
+        setSupabasePrimaryActive(true);
         setDbGallery(updated);
         void putCachedSnapshot('gallery_items', updated);
-        showToast('Ordem de exibição da galeria atualizada.', 'success');
+        showToast('Ordem de exibição da galeria atualizada no Supabase.', 'success');
         return;
       }
 
@@ -2233,7 +2436,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         handleFirestoreError(err, OperationType.WRITE, 'gallery_items');
       }
     },
-    [dbGallery, isAdmin, showToast, supabaseAdminUserId, supabaseReadyForWrites]
+    [dbGallery, isAdmin, showToast, supabaseAdminUserId, supabaseSchemaReady]
   );
 
   const openQuickImageEditor = useCallback((target: QuickImageTarget) => {
@@ -2287,6 +2490,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     runFirebaseToSupabaseMigration,
     resolveMediaUrl,
     uploadMediaAsset,
+    replaceMediaAsset,
     deleteMediaAsset,
     savePortalSlot,
     resetPortalSlot,

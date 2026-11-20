@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Database,
   ExternalLink,
+  FlaskConical,
   Loader2,
   Lock,
   LogOut,
@@ -16,11 +17,47 @@ import {
 import { usePortal } from '../../context/PortalContext';
 import {
   clearMigrationCheckpoint,
+  getSupabaseBrowserClient,
   readMigrationCheckpoint,
+  verifySupabasePublicImageUrl,
   type MigrationInventory,
   type MigrationProgress,
   type MigrationReport,
 } from '../../lib/supabase';
+import { type OptimizedImageResult } from '../../utils/imageOptimizer';
+
+interface SelfTestStep {
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+async function createTinyTestPng(color: string, fileName: string): Promise<OptimizedImageResult> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 4;
+  canvas.height = 4;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas indisponível para gerar imagem de teste.');
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, 4, 4);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('Falha ao gerar PNG de teste.'))),
+      'image/png'
+    );
+  });
+  const dataUrl = canvas.toDataURL('image/png');
+  return {
+    dataUrl,
+    fileName,
+    mimeType: 'image/png',
+    width: 4,
+    height: 4,
+    sizeBytes: blob.size,
+    originalSizeBytes: blob.size,
+  };
+}
 
 const PAGE_NAMES: Record<string, string> = {
   identidade: 'Identidade / Logo',
@@ -44,6 +81,9 @@ export const AdminSupabaseMigrationPanel: React.FC = () => {
     signOutSupabaseAdmin,
     inspectFirebaseMigration,
     runFirebaseToSupabaseMigration,
+    uploadMediaAsset,
+    replaceMediaAsset,
+    deleteMediaAsset,
     showToast,
   } = usePortal();
 
@@ -61,6 +101,9 @@ export const AdminSupabaseMigrationPanel: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [report, setReport] = useState<MigrationReport | null>(null);
   const [checkpoint, setCheckpoint] = useState(() => readMigrationCheckpoint());
+
+  const [runningSelfTest, setRunningSelfTest] = useState(false);
+  const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -182,6 +225,113 @@ export const AdminSupabaseMigrationPanel: React.FC = () => {
   const handleClearCheckpoint = () => {
     clearMigrationCheckpoint();
     setCheckpoint(null);
+  };
+
+  const handleRunStorageSelfTest = async () => {
+    setRunningSelfTest(true);
+    setSelfTestSteps([]);
+    setErrorMsg(null);
+    const steps: SelfTestStep[] = [];
+    const pushStep = (step: SelfTestStep) => {
+      steps.push(step);
+      setSelfTestSteps([...steps]);
+    };
+
+    let createdAssetId: string | null = null;
+    try {
+      const supabase = getSupabaseBrowserClient();
+      if (!supabase) throw new Error('Cliente Supabase não configurado.');
+
+      // 1. Real Upload to bucket fmot-media + public.media_assets
+      const png1 = await createTinyTestPng('#8BAA43', `verificacao_fmot_${Date.now()}_a.png`);
+      const uploaded = await uploadMediaAsset(png1, {
+        page: 'galeria',
+        title: 'Verificação Técnica Automática fmot-media',
+      });
+      createdAssetId = uploaded.assetId;
+
+      const isBucketUrl = uploaded.refUrl.includes('/storage/v1/object/public/fmot-media/');
+      await verifySupabasePublicImageUrl(uploaded.refUrl);
+      const { data: row1, error: row1Err } = await supabase
+        .from('media_assets')
+        .select('id, public_url, storage_path')
+        .eq('id', createdAssetId)
+        .maybeSingle();
+
+      if (row1Err) throw new Error(`Erro ao ler media_assets: ${row1Err.message}`);
+      const uploadPassed = isBucketUrl && row1?.public_url === uploaded.refUrl;
+      pushStep({
+        label: '1. Upload real para fmot-media + registro no banco',
+        passed: uploadPassed,
+        detail: uploadPassed
+          ? `Leitura pública HTTP 200 confirmada · URL salva em media_assets (${row1.storage_path})`
+          : `URL divergente no banco: ${row1?.public_url || 'ausente'}`,
+      });
+      if (!uploadPassed) throw new Error('Falha na verificação do upload inicial.');
+
+      // 2. Real Replacement in-place
+      const png2 = await createTinyTestPng('#526B32', `verificacao_fmot_${Date.now()}_b.png`);
+      const replaced = await replaceMediaAsset(createdAssetId, png2);
+      await verifySupabasePublicImageUrl(replaced.refUrl);
+      const { data: row2, error: row2Err } = await supabase
+        .from('media_assets')
+        .select('id, public_url, storage_path')
+        .eq('id', createdAssetId)
+        .maybeSingle();
+
+      if (row2Err) throw new Error(`Erro ao verificar substituição: ${row2Err.message}`);
+      const replacePassed =
+        row2?.public_url === replaced.refUrl && replaced.refUrl !== uploaded.refUrl;
+      pushStep({
+        label: '2. Substituição individual no bucket + atualização no banco',
+        passed: replacePassed,
+        detail: replacePassed
+          ? `Leitura pública HTTP 200 confirmada · nova URL ativa (${row2.storage_path})`
+          : `Falha na atualização da URL em media_assets.`,
+      });
+      if (!replacePassed) throw new Error('Falha na verificação da substituição.');
+
+      // 3. Real Deletion + cleanup verification
+      await deleteMediaAsset(createdAssetId);
+      const { data: rowAfterDelete } = await supabase
+        .from('media_assets')
+        .select('id')
+        .eq('id', createdAssetId)
+        .maybeSingle();
+      createdAssetId = null;
+
+      const deletePassed = !rowAfterDelete;
+      pushStep({
+        label: '3. Exclusão individual no bucket + limpeza em media_assets',
+        passed: deletePassed,
+        detail: deletePassed
+          ? 'Arquivo de teste e registro removidos com sucesso. Nenhuma imagem existente foi alterada.'
+          : 'O registro ainda consta em media_assets após exclusão.',
+      });
+
+      if (uploadPassed && replacePassed && deletePassed) {
+        showToast('Ciclo completo validado no bucket fmot-media (Upload → Substituição → Exclusão).', 'success');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro durante o teste real no Supabase.';
+      pushStep({
+        label: 'Erro detectado durante a validação',
+        passed: false,
+        detail: msg,
+      });
+      setErrorMsg(msg);
+      showToast(msg, 'error');
+      // Best-effort cleanup of test artifact if upload succeeded before failure
+      if (createdAssetId) {
+        try {
+          await deleteMediaAsset(createdAssetId);
+        } catch {
+          // Ignore cleanup error
+        }
+      }
+    } finally {
+      setRunningSelfTest(false);
+    }
   };
 
   const hasResumableWork = Boolean(
@@ -350,6 +500,55 @@ export const AdminSupabaseMigrationPanel: React.FC = () => {
           </button>
         </div>
       )}
+
+      {/* Live End-to-End Storage Verification for Authenticated Admin */}
+      <div className="space-y-3 border border-[#263F24]/50 bg-[#050705] p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold text-[#F1F3EC]">
+              Validação Real de Upload Direto — Bucket fmot-media
+            </p>
+            <p className="mt-0.5 text-[11px] text-[#A5AAA2]">
+              Executa um ciclo real com uma imagem temporária de 4×4 px (Upload → Leitura Pública
+              HTTP 200 → Substituição → Exclusão) sem tocar em nenhuma imagem existente ou no Firebase.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            disabled={!supabaseReadyForWrites || runningSelfTest || migrating}
+            onClick={() => void handleRunStorageSelfTest()}
+            className="inline-flex items-center gap-2 border border-[#8BAA43]/70 bg-[#0B100C] px-4 py-2 text-xs font-semibold tracking-wider text-[#F1F3EC] transition-colors hover:bg-[#263F24] disabled:cursor-not-allowed disabled:opacity-45 whitespace-nowrap"
+          >
+            {runningSelfTest ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-[#8BAA43]" />
+            ) : (
+              <FlaskConical className="h-3.5 w-3.5 text-[#8BAA43]" />
+            )}
+            {runningSelfTest ? 'VALIDANDO NO BUCKET...' : 'TESTAR CICLO REAL EM fmot-media'}
+          </button>
+        </div>
+
+        {selfTestSteps && selfTestSteps.length > 0 && (
+          <div className="space-y-1.5 border-t border-[#263F24]/45 pt-3 text-xs">
+            {selfTestSteps.map((step, idx) => (
+              <div key={idx} className="flex items-start gap-2">
+                <span
+                  className={`font-mono text-[10px] font-bold ${
+                    step.passed ? 'text-[#8BAA43]' : 'text-[#D62828]'
+                  }`}
+                >
+                  [{step.passed ? 'OK' : 'FALHA'}]
+                </span>
+                <div>
+                  <span className="font-semibold text-[#F1F3EC]">{step.label}: </span>
+                  <span className="text-[#A5AAA2]">{step.detail}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Step 2 & 3 Controls: Pre-flight Read-Only Inspection + Controlled Batched Transfer */}
       <div className="space-y-4 border border-[#263F24]/50 bg-[#050705] p-4">
